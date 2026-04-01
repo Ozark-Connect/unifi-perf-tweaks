@@ -16,6 +16,8 @@ The JVM work went through 5+ distinct heap configurations, each profiled for hou
 
 Every script here has been running on a production gateway serving real users. This is not theoretical.
 
+Once we've collected enough testing data across different models and configurations, these performance enhancements will be integrated into [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer) as automated, one-click deployments.
+
 ---
 
 ## WARNING
