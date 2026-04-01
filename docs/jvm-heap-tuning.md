@@ -52,6 +52,10 @@ These are configurable at the top of the script.
 
 ## Profiling Results
 
+> **Status: Testing in progress (2026-04-01).** Early results show improvement but the advantage narrows as the controller warms up. 24-hour soak test pending before recommending deployment.
+
+### Early results (first 2 hours)
+
 Comparison at 2.7 hours uptime (stock vs. `-Xms384M`):
 
 | Metric | Stock (`-Xms128M`) | Tuned (`-Xms384M`) | Improvement |
@@ -63,17 +67,46 @@ Comparison at 2.7 hours uptime (stock vs. `-Xms384M`):
 | Double-taps (<3s gap) | 3 | 0 | **Eliminated** |
 | CPU time in GC | 0.646% | 0.213% | **3x less** |
 
-The key improvement is **interval between Full GCs** - from every ~1-2 minutes to every ~5 minutes. The individual pause duration doesn't change (it's proportional to live data size), but they happen far less often.
+### Sustained results (4.6 hours)
 
-Hourly trend (tuned config):
+The advantage narrows as the controller warms up and live data grows into the headroom:
 
-| Hour | Full GCs | Total GCs | Avg Full GC interval |
+| Metric | Stock (`-Xms128M`) | Tuned (`-Xms384M`) | Improvement |
 |---|---|---|---|
-| 0 | 10 | 56 | 375s |
-| 1 | 11 | 81 | 323s |
-| 2 | 11 | 206 | 220s |
+| Total GC events | 2,411 | 1,762 | **1.4x fewer** |
+| Full GCs | 198 | 105 | **1.9x fewer** |
+| Full GCs/hour | 43.1 | 22.8 | **1.9x fewer** |
+| Full GC interval | avg 83s | avg 157s | **1.9x longer** |
+| Double-taps (<3s gap) | 7 | 0 | **Eliminated** |
+| CPU time in GC | 0.580% | 0.445% | **1.3x less** |
 
-Intervals degrade from 375s to 220s by hour 2 as the controller warms up and the live data set grows. Still 3x better than stock (73s avg). At 23+ hours, stock settings degrade to Full GC every 18-26s. 24-hour soak results for `-Xms384M` pending.
+### Hourly trend
+
+| Hour | Stock Full GCs | Stock Interval | Tuned Full GCs | Tuned Interval | Ratio |
+|---|---|---|---|---|---|
+| 0 | 25 | 144s | 10 | 375s | 2.6x |
+| 1 | 71 | 51s | 11 | 323s | 6.4x |
+| 2 | 48 | 76s | 18 | 198s | 2.6x |
+| 3 | 32 | 111s | 45 | 79s | 0.7x |
+| 4 | 22 | 94s | 21 | 102s | 1.1x |
+
+The improvement is strongest in the first 2 hours (~3-6x) while the controller is warming up. By hours 3-4, as live data grows and consumes the extra headroom, the ratio converges to ~1-2x. **Double-taps remain eliminated at all time points** - this is the most consistent benefit.
+
+### Memory impact
+
+| Resource | Stock | Tuned | Delta |
+|---|---|---|---|
+| JVM RSS | ~300-400MB | 427MB | +43MB |
+| System available | ~1,050MB | 1,112MB | +62MB |
+| Swap used | ~250MB | 251MB | ~same |
+
+No memory pressure from the higher Xms. The JVM holds a slightly larger heap but isn't consuming proportionally more physical memory.
+
+### Assessment
+
+The `-Xms384M` fix provides a clear improvement in the first 2 hours and eliminates double-tap Full GCs entirely. The sustained improvement (hours 3+) narrows to ~2x as the controller warms up. A higher `-Xms` (512M) may maintain the 3x ratio longer, but needs testing.
+
+**This script is not yet recommended for general deployment.** 24-hour soak test results are needed to determine if the improvement holds long-term or if a different `-Xms` value is optimal. The eMMC and journald scripts provide much larger, proven improvements - deploy those first.
 
 ## Verification
 

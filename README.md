@@ -66,7 +66,7 @@ UniFi Cloud Gateways (particularly models with CPU-attached network ports like t
 
 1. **eMMC write pressure** - MongoDB, journald, and syslog all write to eMMC flash by default. The eMMC flash controller's garbage collection stalls I/O and freezes `ubios-udapi-server`, dropping packets for 30+ minute windows.
 
-2. **JVM garbage collection** - The UniFi controller's stock heap configuration causes Full GC pauses (150-350ms) every 30-70 seconds. Each pause can drop packets on CPU-attached ports.
+2. **JVM garbage collection** - The UniFi controller's stock heap configuration causes Full GC pauses (150-350ms) every 30-70 seconds. Each pause can drop packets on CPU-attached ports. *(JVM tuning is still under active testing - see note below)*
 
 3. **Conservative thermal management** - The fan controller defaults to absurdly high setpoints (CPU at 100C), keeping components hotter than necessary.
 
@@ -74,13 +74,13 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 ## Scripts
 
-| Script | Boot Order | What It Does | Models |
-|---|---|---|---|
-| [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG |
-| [`11-jvm-heap-tuning.sh`](scripts/11-jvm-heap-tuning.sh) | 11 | Fix JVM heap to prevent GC thrashing | All UCG |
-| [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control |
-| [`20-mongodb-ssd-offload.sh`](scripts/20-mongodb-ssd-offload.sh) | 20 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD |
-| [`21-mongodb-ssd-backup.sh`](scripts/21-mongodb-ssd-backup.sh) | 21 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD |
+| Script | Boot Order | What It Does | Models | Status |
+|---|---|---|---|---|
+| [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
+| [`11-jvm-heap-tuning.sh`](scripts/11-jvm-heap-tuning.sh) | 11 | Fix JVM heap to prevent GC thrashing | All UCG | **Testing** |
+| [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
+| [`20-mongodb-ssd-offload.sh`](scripts/20-mongodb-ssd-offload.sh) | 20 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD | Stable |
+| [`21-mongodb-ssd-backup.sh`](scripts/21-mongodb-ssd-backup.sh) | 21 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
 
 ### Boot Order
 
