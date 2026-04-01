@@ -144,11 +144,7 @@ Boot scripts reapply all overlay settings on every boot, so UniFi OS upgrades ar
 
 ## Physical Access
 
-**Always have physical access to your gateway when testing boot scripts.** If a script causes a boot loop or other issue, you need to be able to:
-
-1. Connect a monitor/keyboard (if supported) or serial console
-2. Factory reset via the reset button
-3. Re-flash firmware via USB recovery
+**Always have physical access to your gateway when testing boot scripts.** If a script causes a boot loop or other issue, you need to be able to factory reset via the reset button on the device.
 
 Don't deploy boot scripts to a gateway you can't physically reach.
 
