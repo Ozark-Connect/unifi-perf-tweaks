@@ -29,8 +29,8 @@ Everything here has been thoroughly tested and vetted on production hardware - b
 **Before you touch anything:**
 
 1. **Back up your UniFi Console.** Go to Settings > Control Plane > Backups and create a full backup. Download it. Make sure you actually have the file. If you have to factory reset, this is how you get your network back.
-2. **Have a plan for recovery.** Know how to factory reset your gateway (reset button) and how to restore your backup. If you've never done a restore before, this is not the time to learn on the fly.
-3. **Have physical access to your gateway.** If a boot script causes issues, you need to be able to reach the device.
+2. **Have a plan for recovery.** If things go sideways, you can factory reset (reset button on the device) and restore from your cloud backup or upload your saved backup file through the UI. If you've never done a restore before, this is not the time to learn on the fly.
+3. **Have physical access to your gateway.** You need to be able to reach the reset button if a boot script causes issues.
 
 Once you've got your backup sorted:
 
