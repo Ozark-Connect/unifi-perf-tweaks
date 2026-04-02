@@ -52,61 +52,75 @@ These are configurable at the top of the script.
 
 ## Profiling Results
 
-> **Status: Testing in progress (2026-04-01).** Early results show improvement but the advantage narrows as the controller warms up. 24-hour soak test pending before recommending deployment.
+> **Status: Testing (2026-04-02).** 28-hour soak test complete. The improvement is real but modest at steady state. Still determining optimal `-Xms` value — 384M may be insufficient as live data grows.
 
-### Early results (first 2 hours)
+### Early results (first 2.7 hours)
 
 Comparison at 2.7 hours uptime (stock vs. `-Xms384M`):
 
 | Metric | Stock (`-Xms128M`) | Tuned (`-Xms384M`) | Improvement |
 |---|---|---|---|
-| Total GC events | 1,769 | 343 | **5.2x fewer** |
 | Full GCs | 132 | 32 | **4.1x fewer** |
 | Full GCs/hour | 48.4 | 11.7 | **4.1x fewer** |
 | Full GC interval | avg 73s | avg 304s | **4.2x longer** |
 | Double-taps (<3s gap) | 3 | 0 | **Eliminated** |
 | CPU time in GC | 0.646% | 0.213% | **3x less** |
 
-### Sustained results (4.6 hours)
+These early numbers are impressive but **do not hold** — see 28-hour results below.
 
-The advantage narrows as the controller warms up and live data grows into the headroom:
+### 28-Hour Soak Test Results
 
-| Metric | Stock (`-Xms128M`) | Tuned (`-Xms384M`) | Improvement |
+The controller's live data set grows from ~120MB at startup to ~143-145MB by hour 6, where it stabilizes. This eats into the 384MB floor, reducing effective headroom from ~264MB to ~239MB.
+
+**Overall at 28 hours: 1,978 Full GCs, 70.6/hr avg, 170 double-taps**
+
+| Time of Day (CDT) | Full GCs/hr | Notes |
+|---|---|---|
+| Wed 09:29 (startup) | 41 | JVM warming up |
+| Wed 10:29-11:29 | 66-82 | Live data growing |
+| Wed 14:29-15:29 | 113-118 | Afternoon peak (highest sustained) |
+| Wed 17:29-18:29 | 34-50 | Evening — best hours, intervals 300-500s |
+| Wed 23:29-Thu 00:29 | 41-42 | Overnight low |
+| Thu 03:29 | **264** | Spike — possibly controller housekeeping or post-testing GC storm |
+| Thu 07:29-08:29 | 35-46 | Overnight recovery |
+| Thu 09:29-10:29 | 28 | Morning calm |
+| **Thu 10:29-13:29** | **28-52** | **Day 2 settling — significantly better than day 1 at same hours** |
+
+**Key observation: Day 2 is better than day 1 at the same time of day.** The controller settled in overnight:
+
+| Time of Day | Day 1 | Day 2 | Improvement |
 |---|---|---|---|
-| Total GC events | 2,411 | 1,762 | **1.4x fewer** |
-| Full GCs | 198 | 105 | **1.9x fewer** |
-| Full GCs/hour | 43.1 | 22.8 | **1.9x fewer** |
-| Full GC interval | avg 83s | avg 157s | **1.9x longer** |
-| Double-taps (<3s gap) | 7 | 0 | **Eliminated** |
-| CPU time in GC | 0.580% | 0.445% | **1.3x less** |
+| 09:29-10:29 | 82 | 28 | 2.9x better |
+| 10:29-11:29 | 66 | 39 | 1.7x better |
+| 11:29-12:29 | 77 | 52 | 1.5x better |
+| 12:29-13:29 | 82 | 30 | 2.7x better |
 
-### Hourly trend
-
-| Hour | Stock Full GCs | Stock Interval | Tuned Full GCs | Tuned Interval | Ratio |
-|---|---|---|---|---|---|
-| 0 | 25 | 144s | 10 | 375s | 2.6x |
-| 1 | 71 | 51s | 11 | 323s | 6.4x |
-| 2 | 48 | 76s | 18 | 198s | 2.6x |
-| 3 | 32 | 111s | 45 | 79s | 0.7x |
-| 4 | 22 | 94s | 21 | 102s | 1.1x |
-
-The improvement is strongest in the first 2 hours (~3-6x) while the controller is warming up. By hours 3-4, as live data grows and consumes the extra headroom, the ratio converges to ~1-2x. **Double-taps remain eliminated at all time points** - this is the most consistent benefit.
+Live data stabilized at 143-145MB (no longer growing). Day-2 rates of 28-52/hr are the real baseline.
 
 ### Memory impact
 
 | Resource | Stock | Tuned | Delta |
 |---|---|---|---|
-| JVM RSS | ~300-400MB | 427MB | +43MB |
-| System available | ~1,050MB | 1,112MB | +62MB |
-| Swap used | ~250MB | 251MB | ~same |
+| JVM RSS | ~300-400MB | ~337MB | Minimal |
+| System available | ~1,050MB | ~920MB | Acceptable |
+| Swap used | ~250MB | ~262MB | ~same |
 
-No memory pressure from the higher Xms. The JVM holds a slightly larger heap but isn't consuming proportionally more physical memory.
+No memory pressure from the higher Xms.
+
+### Packet loss impact
+
+**With MongoDB on SSD:** Zero packet loss despite ongoing Full GCs. The eMMC write pressure from MongoDB was the primary cause of packet drops, not JVM GC alone. GC pauses (150-350ms) can occasionally drop a single ping but don't cause the sustained multi-second stalls that eMMC contention does.
+
+**Without MongoDB on SSD:** JVM Full GC pauses compound with eMMC garbage collection to cause real packet loss. If you can't move MongoDB to SSD, JVM heap tuning becomes more important.
 
 ### Assessment
 
-The `-Xms384M` fix provides a clear improvement in the first 2 hours and eliminates double-tap Full GCs entirely. The sustained improvement (hours 3+) narrows to ~2x as the controller warms up. A higher `-Xms` (512M) may maintain the 3x ratio longer, but needs testing.
+`-Xms384M` provides a meaningful improvement that stabilizes after day 1:
+- **Day 2 steady state: 28-52 Full GCs/hr** (vs day 1: 66-118/hr at same hours)
+- Double-taps still occur (170 in 28hr) but are less frequent than stock
+- Live data plateaus at ~145MB — the 384MB floor gives ~240MB headroom at steady state
 
-**This script is not yet recommended for general deployment.** 24-hour soak test results are needed to determine if the improvement holds long-term or if a different `-Xms` value is optimal. The eMMC and journald scripts provide much larger, proven improvements - deploy those first.
+**This script is not yet recommended for general deployment.** We're still determining if `-Xms512M` would provide more consistent results. The eMMC and journald scripts provide much larger, proven improvements — deploy those first.
 
 ## Verification
 
@@ -114,11 +128,18 @@ The `-Xms384M` fix provides a clear improvement in the first 2 hours and elimina
 # Check current JVM settings
 grep "^UNIFI_NATIVE" /etc/default/unifi
 
-# Monitor GC activity (requires PrintGC to be enabled - it is by default)
-journalctl -u unifi -f | grep -i "gc"
-
 # Check controller process for actual flags
-ps aux | grep unifi | grep -oP '\-Xm[sx]\S+'
+# NOTE: The native image runs as "unifi", not "java" — pidof java won't find it
+ps aux | grep "/usr/lib/unifi/lib/unifi" | grep -oP '\-Xm[sx]\S+'
+
+# GC logs go to a file, NOT journalctl
+tail -20 /data/unifi/logs/gc.log
+
+# Count Full GCs
+grep -c "Full GC" /data/unifi/logs/gc.log
+
+# Watch live GC activity
+tail -f /data/unifi/logs/gc.log | grep "Full GC"
 ```
 
 ## Reverting
