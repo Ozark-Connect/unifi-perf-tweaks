@@ -70,3 +70,16 @@ cat > "$CRON_FILE" << EOF
 35 1 * * 0 root $BACKUP_SCRIPT --emmc >> /tmp/mongodb-backup.log 2>&1
 EOF
 log "Cron installed at $CRON_FILE"
+
+# ─── Run initial backup if none exists yet ───
+if [ ! -d "$SSD_BACKUP" ] || [ -z "$(ls -A "$SSD_BACKUP" 2>/dev/null)" ]; then
+    log "No existing backup found. Running initial backup (SSD + eMMC failover)..."
+    "$BACKUP_SCRIPT" --emmc >> /tmp/mongodb-backup.log 2>&1
+    if [ $? -eq 0 ]; then
+        log "Initial backup complete."
+    else
+        log "WARNING: Initial backup failed. Check /tmp/mongodb-backup.log"
+    fi
+else
+    log "Existing backup found, skipping initial backup."
+fi
