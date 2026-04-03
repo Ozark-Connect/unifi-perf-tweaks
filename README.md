@@ -77,7 +77,7 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | Script | Boot Order | What It Does | Models | Status |
 |---|---|---|---|---|
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
-| [`11-jvm-heap-tuning.sh`](scripts/11-jvm-heap-tuning.sh) | 11 | Fix JVM heap to prevent GC thrashing | All UCG | **Testing** |
+| [`11-jvm-heap-tuning.sh`](scripts/11-jvm-heap-tuning.sh) | 11 | Lock JVM heap to prevent GC thrashing | All UCG | **Testing** |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`20-mongodb-ssd-offload.sh`](scripts/20-mongodb-ssd-offload.sh) | 20 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD | Stable |
 | [`21-mongodb-ssd-backup.sh`](scripts/21-mongodb-ssd-backup.sh) | 21 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |

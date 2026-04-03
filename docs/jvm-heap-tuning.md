@@ -13,33 +13,40 @@ The result:
 2. "Double-tap" patterns where two Full GCs fire within 1 second
 3. On models with CPU-attached network ports, each GC pause drops packets
 
-### Why `-XX:MaxHeapFree` Does Nothing
+### Why Nothing Prevents Heap Shrinking (except locking)
 
-Ubiquiti's service file includes `-XX:MaxHeapFree=0` in `UNIFI_NATIVE_OVERRIDE_OPTS`. This is an **Android ART flag** - GraalVM silently ignores it. All community tuning guides that adjust `MaxHeapFree` have no effect.
+The SubstrateVM Serial GC uses an **Adaptive2 collection policy** with `MIN_HEAP_FREE_RATIO = 0` hardcoded — there is no configurable floor on free space. After each Full GC, the adaptive policy shrinks the committed heap down to just above live data, regardless of what flags you set.
 
-The actual lever for GraalVM Serial GC is **`-Xms`** - it sets the committed heap floor so the GC can't shrink the heap back to the live data size.
+This was confirmed by reading the [GraalVM SubstrateVM source code](https://github.com/oracle/graal/tree/master/substratevm/src/com.oracle.svm.core.genscavenge/src/com/oracle/svm/core/genscavenge) (`HeapChunkProvider.java`, `AdaptiveCollectionPolicy2.java`, `AbstractCollectionPolicy.java`).
 
 ### What Doesn't Work
 
 | Flag | Why |
 |---|---|
-| `-XX:MaxHeapFree=*` | Android ART flag, silently ignored by GraalVM |
+| `-Xms` (when != `-Xmx`) | Only sets initial committed size — adaptive policy shrinks below it in ~50 minutes |
+| `-XX:MinHeapSize` | Only constrains initial generation sizes — not checked during shrinking |
+| `-XX:MaxHeapFree=N` | **Upper bound (cap)**, not a floor — means "retain at most N free bytes." Can only reduce retention, never increase it. |
 | `-XX:MaxHeapFreeRatio=*` | HotSpot flag, not recognized by SubstrateVM |
 | Switching to G1GC | Requires Enterprise Edition + native image rebuild |
+
+> **Note on MaxHeapFree:** Ubiquiti's service file sets `MaxHeapFree=0` in `UNIFI_NATIVE_OVERRIDE_OPTS`, meaning "automatic per GC policy." This is actually a real SubstrateVM flag (not Android ART as we initially believed), but since it's an upper bound cap, setting it to any value only limits how much free space the GC retains — it cannot prevent shrinking. Community tuning guides that increase MaxHeapFree are ineffective.
+>
+> Additionally, `UNIFI_NATIVE_OVERRIDE_OPTS` is appended after `UNIFI_NATIVE_OPTS` on the command line, and **last flag wins**. Any MaxHeapFree value set in NATIVE_OPTS is clobbered by the service file's `MaxHeapFree=0`. The boot script overrides OVERRIDE_OPTS to fix this, but the point is moot since MaxHeapFree doesn't prevent shrinking regardless.
 
 ## What the Script Does
 
 1. Detects whether Suricata/IPS is active
-2. Sets appropriate `-Xms` and `-Xmx` values in `/etc/default/unifi`
-3. Removes dead ART flags (`MaxHeapFree`, `StackSize`) from `UNIFI_NATIVE_OVERRIDE_OPTS`
-4. Adds `-XX:+ExitOnOutOfMemoryError` (a flag GraalVM actually recognizes)
+2. **Locks the heap** — sets `-Xms` equal to `-Xmx` in `/etc/default/unifi`
+3. Strips ineffective flags (`MaxHeapFree`, `MinHeapSize`) from NATIVE_OPTS
+4. Overrides `UNIFI_NATIVE_OVERRIDE_OPTS` to remove the service file's stock flags (prevents flag clobbering)
+5. Adds `-XX:+ExitOnOutOfMemoryError` (a flag GraalVM actually recognizes)
 
 ### Heap Sizes
 
-| IPS Status | `-Xms` | `-Xmx` | Rationale |
-|---|---|---|---|
-| **Off** | 384M | 768M | ~250MB headroom above ~120MB live data |
-| **On** | 256M | 768M | Suricata uses ~778MB, smaller floor to leave room |
+| IPS Status | Heap (locked) | Rationale |
+|---|---|---|
+| **Off** | 768M | ~638MB headroom above ~130MB live data → 400-500s Full GC intervals |
+| **On** | 640M | Matches Ubiquiti's stock Xmx, known to fit alongside Suricata (~778MB) |
 
 These are configurable at the top of the script.
 
@@ -52,7 +59,7 @@ These are configurable at the top of the script.
 
 ## Profiling Results
 
-> **Status: Testing (2026-04-02).** 28-hour soak test complete. The improvement is real but modest at steady state. Still determining optimal `-Xms` value — 384M may be insufficient as live data grows.
+> **Status: Testing (2026-04-02).** Locked heap (`-Xms` == `-Xmx`) confirmed as the only effective configuration. 85-minute profiling shows 4x fewer Full GCs and 10x longer intervals vs all unlocked configs. 24-hour soak in progress.
 
 ### Early results (first 2.7 hours)
 
@@ -113,14 +120,59 @@ No memory pressure from the higher Xms.
 
 **Without MongoDB on SSD:** JVM Full GC pauses compound with eMMC garbage collection to cause real packet loss. If you can't move MongoDB to SSD, JVM heap tuning becomes more important.
 
+### Why unlocked heaps don't work
+
+`-Xms` only sets the **initial** committed heap size. The Adaptive2 collection policy ignores it when shrinking — within ~50 minutes the heap compresses back down to near live data size (~145MB), regardless of the Xms value.
+
+Every unlocked configuration showed the same pattern:
+
+| Config | Heap at 10min | Heap at 50min | Result |
+|---|---|---|---|
+| `-Xms384M -Xmx768M` | 335M | 165M | Compressed — 72.9/hr Full GCs at 25hr |
+| `-Xms512M -Xmx768M` | 335M | 155M | Compressed — identical degradation |
+| `-Xms512M -Xmx768M -XX:MaxHeapFree=384M -XX:MinHeapSize=512M` | 343M | 155M | Compressed — MaxHeapFree/MinHeapSize had zero effect |
+
+### The fix: `-Xms` == `-Xmx` (locked heap)
+
+The only way to prevent the Adaptive2 policy from shrinking is to lock the heap: set `-Xms` equal to `-Xmx`. With no room to shrink, the GC retains all free space between collections.
+
+#### Locked heap results (`-Xms768M -Xmx768M`)
+
+At 85 minutes (the point where all unlocked configs had fully degraded):
+
+| Metric | Unlocked (best of 3 configs) | **Locked** |
+|---|---|---|
+| Full GCs/hr | 26-44 | **10.6** |
+| Full GC interval | 28-79s (compressing) | **345-525s (stable)** |
+| Double-taps | 0-170 | **0** |
+| Heap before GC | 155-195M (compressed) | **329-338M (rock solid)** |
+
+The heap stayed at 329-338M before every Full GC — no compression. Live data stable at 112-119M, giving ~638M headroom that allocations fill over 400-500 seconds before the next Full GC.
+
+### Memory impact
+
+| Resource | Stock | Locked 768M |
+|---|---|---|
+| JVM committed | ~150-200MB | 768MB |
+| System available | ~1,050MB | ~830MB |
+
+The locked heap commits 768MB from startup. On a UCG-Fiber with 2.9GB total RAM, this leaves ~830MB available — comfortable with no Suricata. With Suricata, the script uses 640M (Ubiquiti's stock Xmx) which is known to fit.
+
+### Packet loss impact
+
+**With MongoDB on SSD:** Zero packet loss despite ongoing Full GCs. The eMMC write pressure from MongoDB was the primary cause of packet drops, not JVM GC alone. With MongoDB on SSD, GC pauses (150-350ms) can occasionally drop a single ping but don't cause sustained loss.
+
+**Without MongoDB on SSD:** JVM Full GC pauses compound with eMMC garbage collection to cause real packet loss. If you can't move MongoDB to SSD, JVM heap tuning becomes more important.
+
 ### Assessment
 
-`-Xms384M` provides a meaningful improvement that stabilizes after day 1:
-- **Day 2 steady state: 28-52 Full GCs/hr** (vs day 1: 66-118/hr at same hours)
-- Double-taps still occur (170 in 28hr) but are less frequent than stock
-- Live data plateaus at ~145MB — the 384MB floor gives ~240MB headroom at steady state
+The locked heap configuration (`-Xms` == `-Xmx`) provides a clear, stable improvement:
+- **4x fewer Full GCs** than any unlocked configuration at steady state
+- **10x longer intervals** (400-500s vs 30-70s)
+- **Zero double-taps** — eliminates the rapid-fire GC storms that cause packet loss blips
+- **No degradation over time** — the heap can't compress because there's nowhere to shrink
 
-**This script is not yet recommended for general deployment.** We're still determining if `-Xms512M` would provide more consistent results. The eMMC and journald scripts provide much larger, proven improvements — deploy those first.
+24-hour soak test is in progress. The eMMC and journald scripts still provide the largest proven improvements — deploy those first.
 
 ## Verification
 
@@ -148,7 +200,7 @@ Remove the script from `/data/on_boot.d/` and reboot. The overlay resets `/etc/d
 
 ```bash
 # Restore stock settings
-sed -i 's/-Xms384M/-Xms128M/' /etc/default/unifi
+sed -i 's/-Xms768M/-Xms128M/' /etc/default/unifi
 sed -i 's/-Xmx768M/-Xmx640M/' /etc/default/unifi
 systemctl restart unifi
 ```
