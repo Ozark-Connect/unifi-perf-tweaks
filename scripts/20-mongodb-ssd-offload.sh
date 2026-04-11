@@ -27,6 +27,20 @@ log() {
     logger -t "$LOG_TAG" "$1"
 }
 
+# ─── Model check ───
+# Only UCG-Fiber is tested and supported. Other UCG models (UCG-Max) may
+# work but are unverified; non-UCG models (UDM-Pro, UDM-SE, UDM-Pro Max)
+# use entirely different storage layouts and running this script could
+# land a bind mount in the wrong place. Refuse to run on anything else.
+MODEL_INFO="/proc/ubnthal/system.info"
+if [ -r "$MODEL_INFO" ] && grep -qi '^shortname=UCGF$' "$MODEL_INFO"; then
+    : # UCG-Fiber, proceed
+else
+    MODEL_NAME=$(grep -i '^name=' "$MODEL_INFO" 2>/dev/null | cut -d= -f2-)
+    log "Not running: this script is for UCG-Fiber only. Detected: ${MODEL_NAME:-unknown}."
+    exit 0
+fi
+
 # Detect the SSD mount point. Firmware 5.0.x and older mount the NVMe at
 # /volume1; 5.1.7+ EA mounts it at /volume/<uuid>/. On success, sets
 # SSD_MOUNT and returns 0. Returns 1 if no SSD mount is found.

@@ -25,6 +25,18 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
 }
 
+# ─── Model check ───
+# Only UCG-Fiber is tested and supported. See 20-mongodb-ssd-offload.sh
+# for the rationale.
+MODEL_INFO="/proc/ubnthal/system.info"
+if [ -r "$MODEL_INFO" ] && grep -qi '^shortname=UCGF$' "$MODEL_INFO"; then
+    : # UCG-Fiber, proceed
+else
+    MODEL_NAME=$(grep -i '^name=' "$MODEL_INFO" 2>/dev/null | cut -d= -f2-)
+    log "Not running: this script is for UCG-Fiber only. Detected: ${MODEL_NAME:-unknown}."
+    exit 0
+fi
+
 # Detect the SSD mount point. Firmware 5.0.x and older mount the NVMe at
 # /volume1; 5.1.7+ EA mounts it at /volume/<uuid>/.
 detect_ssd_mount() {

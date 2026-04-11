@@ -96,18 +96,18 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 | Model | journald | JVM heap | Fan tuning | MongoDB SSD | Tested? |
 |---|---|---|---|---|---|
 | **UCG-Fiber** | Yes | Yes | Yes | Yes | **Yes** |
-| **UCG-Max** | Likely | Likely | Check `config.fan` | Check SSD path | No |
+| **UCG-Max** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
 | **UCG-Ultra** | Likely | Likely | Check `config.fan` | No SSD | No |
 | **UCG-Lite** | Likely | Likely | Check `config.fan` | No SSD | No |
-| **UDM-Pro** | Likely | Likely | Check `config.fan` | Check SSD path | No |
-| **UDM-SE** | Likely | Likely | Check `config.fan` | Check SSD path | No |
-| **UDM-Pro Max** | Likely | Likely | Check `config.fan` | Check SSD path | No |
+| **UDM-Pro** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
+| **UDM-SE** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
+| **UDM-Pro Max** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
 
 "Likely" means the underlying mechanism (systemd, JVM config) should be the same, but paths and device names may differ. **Verify on your device before deploying.**
 
 "Check `config.fan`" means: run the diagnostic command in the [fan tuning docs](docs/fan-control-tuning.md#before-you-apply-check-your-model) to see what PID categories your model has. The script safely skips categories that don't exist.
 
-"Check SSD path" means: the scripts auto-detect `/volume1` and `/volume/<uuid>/` (the two schemes used by UniFi OS 5.0.x and 5.1.7+ respectively), with a fallback to `/dev/md3`. If your model uses something else entirely (UDM-Pro's `/mnt/data`, etc.), run `lsblk` and `mount` to find it and extend `detect_ssd_mount()` in the script.
+"Blocked by model check" means: the SSD scripts (`20-mongodb-ssd-offload.sh` and `21-mongodb-ssd-backup.sh`) check `/proc/ubnthal/system.info` at the top and refuse to run on anything except UCG-Fiber. This is a safety gate: non-UCG-Fiber devices use entirely different storage layouts (UDM-Pro's `/mnt/data`, etc.), and running the scripts unsupervised on them could create bind mounts in the wrong place. If you're running a different model and want to adapt these scripts, remove the model check block and extend `detect_ssd_mount()` to find your SSD - but do that manually and test, don't just deploy.
 
 ## Prerequisites
 
