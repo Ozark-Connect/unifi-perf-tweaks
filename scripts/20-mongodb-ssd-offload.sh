@@ -92,6 +92,24 @@ if systemctl is-active --quiet unifi 2>/dev/null; then
     RESTART_UNIFI=true
 fi
 
+# On some firmware, mongod does not exit with `systemctl stop unifi`.
+# If it's still alive, escalate — bind-mounting over a live WiredTiger
+# directory corrupts storage.bson on next start.
+if pgrep -x mongod >/dev/null 2>&1; then
+    log "mongod still running after unifi stop. Sending SIGTERM..."
+    pkill -TERM -x mongod
+    for i in $(seq 1 15); do
+        if ! pgrep -x mongod >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+fi
+if pgrep -x mongod >/dev/null 2>&1; then
+    log "ERROR: mongod still running after SIGTERM. Aborting bind mount to avoid corruption."
+    exit 1
+fi
+
 # Apply bind mount
 mount --bind "$SSD_DB_DIR" "$EMMC_DB_DIR"
 

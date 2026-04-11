@@ -80,6 +80,10 @@ du -sh /volume1/unifi-db
 # 1. Stop the controller and wait for MongoDB to fully exit
 systemctl stop unifi
 # Wait until mongod is gone (may take 30-60 seconds)
+for i in $(seq 1 60); do pgrep -x mongod >/dev/null || break; sleep 1; done
+# On some firmware, mongod does not exit with `systemctl stop unifi`.
+# If it's still running at this point, terminate it directly:
+pgrep -x mongod >/dev/null && pkill -TERM -x mongod
 while pgrep -x mongod >/dev/null; do sleep 1; done
 
 # 2. Unmount the bind mount (exposes original eMMC data underneath)
