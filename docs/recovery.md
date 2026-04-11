@@ -5,30 +5,110 @@ If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you n
 ## Which path should I use?
 
 ```
-┌─ Is the bind-mounted SSD data still readable and current?
-│  (i.e., your controller is running OK, you just want to stop using
-│   the SSD offload, or the SSD hardware itself is healthy)
+┌─ Did you JUST try to install 06 for the first time (within the last
+│  few minutes) and it's either failing now or you changed your mind?
 │
-│  ─→ Yes → Path A: Live-migrate back to eMMC
-│           Controller ends up on eMMC with your current, up-to-date data.
+│  ─→ Yes → Path D: First-run rollback
+│           Simplest path. The eMMC data is still current because the
+│           install is too recent for eMMC and SSD to have diverged.
 │
-│  ─→ No  → Is a backup from 07-mongodb-ssd-backup.sh available?
-│           (check /volume1/unifi-db-backup/ and /data/unifi/data/db-backup/)
+│  ─→ No  → Is the bind-mounted SSD data still readable and current?
+│           (i.e., the controller has been running off the SSD for a
+│            while, and now you want to stop using the SSD offload,
+│            or the SSD hardware itself is healthy)
 │
-│           ─→ Yes → Path B: Restore from backup via mongorestore
-│                    Controller ends up on eMMC with data up to 24h old
-│                    (SSD daily backup) or 7d old (eMMC weekly failover).
+│           ─→ Yes → Path A: Live-migrate back to eMMC
+│                    Controller ends up on eMMC with your current,
+│                    up-to-date data.
 │
-│           ─→ No  → Path C: Nuclear fallback on the pre-deploy snapshot
-│                    Controller ends up on whatever the eMMC directory
-│                    held at the moment 06 first ran. THIS IS STALE —
-│                    potentially weeks or months old. Only use this if
-│                    you're about to restore from a UniFi Console UI
-│                    backup afterward, or you're OK losing everything
-│                    after the initial offload date.
+│           ─→ No  → Is a backup from 07-mongodb-ssd-backup.sh available?
+│                    (check /volume1/unifi-db-backup/ and
+│                     /data/unifi/data/db-backup/)
+│
+│                    ─→ Yes → Path B: Restore from backup via mongorestore
+│                             Controller ends up on eMMC with data up to
+│                             24h old (SSD daily) or 7d old (eMMC weekly).
+│
+│                    ─→ No  → Path C: Nuclear fallback on the pre-deploy
+│                             snapshot. STALE — potentially weeks or
+│                             months old. Only use if you're about to
+│                             restore from a UniFi Console UI backup
+│                             afterward, or you're OK losing everything
+│                             after the initial offload date.
 ```
 
 > **Every path below is idempotent and safe to re-run.** If you start down one path and decide to switch, just run the next path's snippet — each one starts by stopping the stack cleanly.
+
+---
+
+## Path D — First-run install rollback
+
+**Use when:** You just deployed `06-mongodb-ssd-offload.sh` for the first time (minutes ago, not days ago), and either:
+- The live-run failed mid-way and left the gateway in a partial state
+- The live-run completed but unifi won't start or is behaving badly
+- You successfully deployed it but changed your mind and want to back out immediately
+
+**Why this is simpler than Path A:** The `cp -a` from `/data/unifi/data/db` to `/volume1/unifi-db/` just happened. No writes have landed on the SSD since, which means the eMMC copy under the bind mount is **byte-identical** to the SSD copy — unmounting exposes *current* data, not the stale pre-deploy snapshot that Path C's warning is about. You don't need to copy anything back to eMMC; the data is already there.
+
+**Pre-conditions:**
+- `06` ran within the last few minutes. If it's been hours or days, use Path A instead — writes have almost certainly landed on the SSD that aren't on eMMC.
+- You haven't deployed `07-mongodb-ssd-backup.sh` *and* had it successfully run a backup yet. (If you have, it's fine — just also run `rm -rf /volume1/unifi-db-backup /data/unifi/data/db-backup` afterward to clean up the unused artifacts.)
+
+**Controller outage:** 10–30 seconds.
+
+```bash
+ssh root@<gateway-ip> bash -s << 'EOF'
+set +e
+
+# 1. Stop the whole stack cleanly
+systemctl stop unifi-mongodb.service
+if pgrep -x mongod >/dev/null; then
+    echo "FAIL: mongod still running after systemctl stop; aborting"
+    exit 1
+fi
+
+# 2. Unmount the bind mount if it's active. On a failed first-run this
+#    may or may not be up depending on where the script aborted.
+umount /data/unifi/data/db 2>/dev/null
+
+# 3. Remove boot scripts and helpers so nothing re-establishes the
+#    offload on next boot
+rm -f /data/on_boot.d/06-mongodb-ssd-offload.sh
+rm -f /data/on_boot.d/07-mongodb-ssd-backup.sh
+rm -f /etc/cron.d/mongodb-ssd-backup
+rm -rf /data/unifi-db-ssd
+
+# 4. Clean up the SSD copy that 06 just created (safe because eMMC has
+#    an identical copy). Uses the same /volume1 and /volume/<uuid>/
+#    detection as the script itself.
+SSD_MOUNT=""
+if mountpoint -q /volume1 2>/dev/null; then
+    SSD_MOUNT=/volume1
+else
+    for d in /volume/*/; do
+        [ -d "$d" ] && mountpoint -q "${d%/}" 2>/dev/null && { SSD_MOUNT="${d%/}"; break; }
+    done
+fi
+if [ -n "$SSD_MOUNT" ]; then
+    rm -rf "$SSD_MOUNT/unifi-db"
+    rm -rf "$SSD_MOUNT/unifi-db-backup"
+fi
+rm -rf /data/unifi/data/db-backup
+
+# 5. Start unifi. systemd pulls unifi-mongodb as a dep and mongod opens
+#    the eMMC copy of the data — which is current, because no writes
+#    have happened since the cp.
+systemctl start unifi
+
+# 6. Verify
+findmnt /data/unifi/data/db && echo "WARN: something is still mounted at /data/unifi/data/db"
+systemctl is-active unifi unifi-mongodb
+EOF
+```
+
+**Result:** Gateway is back to exactly the state it was in before you ran `06`. No stale data, no orphaned SSD directories, no boot scripts queued for next reboot. Tidy.
+
+**If you want to try the install again later:** fine — just re-deploy `06` normally. The SSD directories are gone, so the next run will hit the first-run migration path cleanly.
 
 ---
 
