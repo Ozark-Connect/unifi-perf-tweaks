@@ -53,7 +53,7 @@ If you're not comfortable SSH-ing into your gateway and recovering from a bad bo
 The MongoDB SSD scripts (`06-mongodb-ssd-offload.sh` and `07-mongodb-ssd-backup.sh`) have been end-to-end dogfooded on a UCG-Fiber lab unit against:
 
 - **UniFi OS 5.0.16** / UniFi Network 10.2.105 — first-run migration, warm reboot, cold boot (power cycle) all verified clean.
-- **UniFi OS 5.1.7 EA** — OS upgrade from 5.0.16 verified; the SSD mount path auto-migrated from `/volume1` to `/volume/<uuid>/` and the bind mount re-established on boot without intervention.
+- **UniFi OS 5.1.7 EA** / UniFi Network 10.3.47 — OS upgrade from 5.0.16 verified (the SSD mount path auto-migrated from `/volume1` to `/volume/<uuid>/` and the bind mount re-established on boot without intervention), followed by a Network app upgrade to 10.3.47 with no issues.
 
 In addition, the bind-mount approach (the steady-state runtime behavior) has been in continuous use on a personal UCG-Fiber production gateway for several weeks, covering real traffic, Protect coexistence, nightly backups, and the full eMMC-write-pressure scenarios [documented in docs/](docs/emmc-write-pressure.md).
 
