@@ -1,8 +1,10 @@
 # mongodb-ssd-offload
 
 **Script:** [`scripts/20-mongodb-ssd-offload.sh`](../scripts/20-mongodb-ssd-offload.sh)
-**Compatibility:** UCG models with NVMe SSD - UCG-Fiber, UCG-Max, or any model with `/volume1`
+**Compatibility:** UCG models with NVMe SSD (UCG-Fiber, UCG-Max, etc.)
 **Risk level:** Medium - moves database I/O to a different device. Has graceful fallback to eMMC.
+
+> **Note on SSD mount paths:** UniFi OS 5.0.x and earlier mount the NVMe SSD at `/volume1`. UniFi OS 5.1.7 EA and newer mount it at `/volume/<uuid>/` instead. The script auto-detects both layouts at runtime, so the examples in this doc use `/volume1` for clarity but will apply to either path on your gateway. If you need to check manually, run `findmnt /dev/md3`.
 
 ## Problem
 
@@ -20,18 +22,18 @@ This isn't about eMMC wear - the flash cells are fine. eMMC GC stalls are inhere
 
 ## What the Script Does
 
-1. Waits up to 60 seconds for `/volume1` (SSD) to mount at boot
+1. Waits up to 60 seconds for the SSD to mount (auto-detects `/volume1` or `/volume/<uuid>/`)
 2. If no SSD copy exists: stops UniFi, copies eMMC data to SSD, sets up bind mount
 3. If SSD copy exists: sets up bind mount directly
 4. Starts UniFi controller on the SSD-backed MongoDB
 
 ### Graceful Fallback
 
-If `/volume1` never mounts (SSD missing, failed, or different model), the script logs a warning and exits. The controller runs on eMMC as normal - no harm done.
+If no SSD mount is detected (SSD missing, failed, or different model), the script logs a warning and exits. The controller runs on eMMC as normal - no harm done.
 
 ## Requirements
 
-- NVMe SSD mounted at `/volume1` (standard on UCG-Fiber and UCG-Max)
+- NVMe SSD mounted at `/volume1` or `/volume/<uuid>/` (standard on UCG-Fiber and UCG-Max; auto-detected)
 - Enough free space on SSD for MongoDB data (typically 500MB-2GB depending on site size)
 - If Protect is using the SSD, ensure there's headroom - MongoDB data is small relative to video
 

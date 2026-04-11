@@ -51,7 +51,7 @@ If you're not comfortable SSH-ing into your gateway and recovering from a bad bo
 If you're running a different model (UDM-Pro, UDM-SE, UCG-Max, UCG-Ultra, etc.), **you need to verify before deploying:**
 
 - **eMMC device path** - Scripts reference `/dev/mmcblk0`. Your device may use a different block device.
-- **SSD mount point** - SSD scripts assume `/volume1`. UDM-Pro mounts the HDD/SSD differently (often `/mnt/data` or `/data_ext`). Check `lsblk` and `mount` on your device.
+- **SSD mount point** - SSD scripts auto-detect `/volume1` (UniFi OS 5.0.x) and `/volume/<uuid>/` (UniFi OS 5.1.7+ EA), falling back to whatever `/dev/md3` is mounted as. UDM-Pro mounts storage differently (often `/mnt/data` or `/data_ext`) and is not auto-detected - check `lsblk` and `mount` on your device and extend `detect_ssd_mount()` in the script if needed.
 - **MongoDB data path** - Scripts assume `/data/unifi/data/db`. Confirm with `findmnt` or `ls /data/unifi/data/`.
 - **Fan PID categories** - The fan tuning script uses category names from the UCG-Fiber (`cpu`, `hdd`, `rtl8372`, `rtl8261`). Your model will have different hardware and different category names. Always check `config.fan` first - see the [fan tuning docs](docs/fan-control-tuning.md#before-you-apply-check-your-model).
 - **Service names** - `uhwd.service`, `unifi.service`, `systemd-journald` should be consistent, but verify.
@@ -89,7 +89,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 - `10` and `11` have no dependencies - run them early
 - `15` needs `uhwd.service` running (it waits internally, so order doesn't matter much)
 - **`21` must come after `20`** - the backup script depends on the SSD offload being set up
-- `20` benefits from running later (gives `/volume1` time to mount)
+- `20` benefits from running later (gives the SSD mount time to appear)
 
 ### Model Compatibility
 
@@ -107,7 +107,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 
 "Check `config.fan`" means: run the diagnostic command in the [fan tuning docs](docs/fan-control-tuning.md#before-you-apply-check-your-model) to see what PID categories your model has. The script safely skips categories that don't exist.
 
-"Check SSD path" means: your model may mount the SSD at a different path than `/volume1`. Run `lsblk` and `mount` to find the correct mount point, then update `SSD_DB_DIR` at the top of the script.
+"Check SSD path" means: the scripts auto-detect `/volume1` and `/volume/<uuid>/` (the two schemes used by UniFi OS 5.0.x and 5.1.7+ respectively), with a fallback to `/dev/md3`. If your model uses something else entirely (UDM-Pro's `/mnt/data`, etc.), run `lsblk` and `mount` to find it and extend `detect_ssd_mount()` in the script.
 
 ## Prerequisites
 

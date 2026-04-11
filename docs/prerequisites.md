@@ -137,7 +137,7 @@ Scripts are numbered to run in a sensible order. If you have existing scripts in
 | Scripts in `/data/on_boot.d/` | Preserved | Preserved | **Wiped** |
 | `/etc/default/unifi` (JVM settings) | Preserved | **Reset to stock** | **Reset** |
 | `/etc/systemd/journald.conf` | Preserved | **Reset to stock** | **Reset** |
-| SSD data (`/volume1/unifi-db/`) | Preserved | Preserved | **May be wiped** |
+| SSD data (`/volume1/unifi-db/` or `/volume/<uuid>/unifi-db/`) | Preserved | Preserved | **May be wiped** |
 | `config.fan` (fan settings) | Preserved until uhwd restart | **Reset** | **Reset** |
 
 Boot scripts reapply all overlay settings on every boot, so UniFi OS upgrades are handled automatically. After a factory reset, you need to reinstall udm-boot and re-deploy the scripts.
@@ -156,7 +156,10 @@ These scripts were tested on a UCG-Fiber. If you're on a different model, SSH in
 # 1. Check eMMC device path (scripts reference /dev/mmcblk0)
 lsblk
 
-# 2. Check SSD mount point (scripts assume /volume1)
+# 2. Check SSD mount point - scripts auto-detect /volume1 (UniFi OS 5.0.x)
+#    and /volume/<uuid>/ (UniFi OS 5.1.7+ EA). Use findmnt to see which
+#    one your firmware uses:
+findmnt /dev/md3
 mount | grep -E "md|nvme|sd"
 
 # 3. Check MongoDB data path (scripts assume /data/unifi/data/db)
@@ -179,4 +182,4 @@ cat /etc/default/unifi | grep UNIFI_NATIVE
 cat /etc/systemd/journald.conf
 ```
 
-If any paths or device names differ from what the scripts expect, update the variables at the top of the relevant script before deploying. For SSD scripts specifically: UDM-Pro models often mount storage at `/mnt/data` or `/data_ext` rather than `/volume1`.
+If any paths or device names differ from what the scripts expect, update the variables at the top of the relevant script before deploying. For SSD scripts specifically: the `detect_ssd_mount()` helper handles `/volume1` and `/volume/<uuid>/` automatically, but UDM-Pro's `/mnt/data` or `/data_ext` schemes are not covered - extend the helper or set the mount point manually.

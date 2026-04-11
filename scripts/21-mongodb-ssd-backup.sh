@@ -15,7 +15,7 @@
 # Requires: 20-mongodb-ssd-offload.sh deployed first.
 
 # ─── Configuration ───
-SSD_BACKUP="/volume1/unifi-db-backup"
+SSD_BACKUP_SUBDIR="unifi-db-backup"   # Subdir on the SSD for backups
 EMMC_BACKUP="/data/unifi/data/db-backup"
 BACKUP_SCRIPT="/data/unifi-db-ssd/backup.sh"
 
@@ -25,17 +25,80 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
 }
 
+# Detect the SSD mount point. Firmware 5.0.x and older mount the NVMe at
+# /volume1; 5.1.7+ EA mounts it at /volume/<uuid>/.
+detect_ssd_mount() {
+    if mountpoint -q /volume1 2>/dev/null; then
+        SSD_MOUNT=/volume1
+        return 0
+    fi
+    local d mp
+    for d in /volume/*/; do
+        [ -d "$d" ] || continue
+        mp="${d%/}"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            SSD_MOUNT="$mp"
+            return 0
+        fi
+    done
+    local t
+    t=$(findmnt -no TARGET /dev/md3 2>/dev/null | head -1)
+    if [ -n "$t" ]; then
+        SSD_MOUNT="$t"
+        return 0
+    fi
+    return 1
+}
+
+if ! detect_ssd_mount; then
+    log "ERROR: No SSD mount (/volume1 or /volume/<uuid>) found. Aborting."
+    exit 1
+fi
+SSD_BACKUP="$SSD_MOUNT/$SSD_BACKUP_SUBDIR"
+log "SSD mount: $SSD_MOUNT"
+
 # ─── Install the backup script to /data (persists across reboots) ───
 mkdir -p "$(dirname "$BACKUP_SCRIPT")"
 cat > "$BACKUP_SCRIPT" << 'SCRIPT_EOF'
 #!/bin/bash
-SSD_BACKUP="/volume1/unifi-db-backup"
+SSD_BACKUP_SUBDIR="unifi-db-backup"
 EMMC_BACKUP="/data/unifi/data/db-backup"
 LOG_TAG="mongodb-ssd-backup"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
 }
+
+# Detect the SSD mount point. Firmware 5.0.x and older mount the NVMe at
+# /volume1; 5.1.7+ EA mounts it at /volume/<uuid>/.
+detect_ssd_mount() {
+    if mountpoint -q /volume1 2>/dev/null; then
+        SSD_MOUNT=/volume1
+        return 0
+    fi
+    local d mp
+    for d in /volume/*/; do
+        [ -d "$d" ] || continue
+        mp="${d%/}"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            SSD_MOUNT="$mp"
+            return 0
+        fi
+    done
+    local t
+    t=$(findmnt -no TARGET /dev/md3 2>/dev/null | head -1)
+    if [ -n "$t" ]; then
+        SSD_MOUNT="$t"
+        return 0
+    fi
+    return 1
+}
+
+if ! detect_ssd_mount; then
+    log "ERROR: No SSD mount (/volume1 or /volume/<uuid>) found. Aborting."
+    exit 1
+fi
+SSD_BACKUP="$SSD_MOUNT/$SSD_BACKUP_SUBDIR"
 
 # Step 1: mongodump to SSD
 mkdir -p "$SSD_BACKUP"

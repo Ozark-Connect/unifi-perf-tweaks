@@ -9,22 +9,48 @@
 # eMMC location. On first run, it migrates the existing data. On subsequent
 # boots, it sets up the bind mount directly.
 #
-# Requires: NVMe SSD with /volume1 mount point (UCG-Fiber, UCG-Max, or any
-# model with an internal SSD). Not needed on eMMC-only models (UCG-Lite, etc.)
-# - those models don't have an SSD to offload to.
+# Requires: NVMe SSD with a /volume* mount point (UCG-Fiber, UCG-Max, or
+# any model with an internal SSD). Not needed on eMMC-only models
+# (UCG-Lite, etc.) - those models don't have an SSD to offload to.
 #
 # Falls back gracefully to eMMC if the SSD is not available.
 
 # ─── Configuration ───
-SSD_DB_DIR="/volume1/unifi-db"       # Where MongoDB data lives on SSD
+SSD_DB_SUBDIR="unifi-db"             # Subdir on the SSD for MongoDB data
 EMMC_DB_DIR="/data/unifi/data/db"    # Stock MongoDB location (eMMC)
-MAX_WAIT=60                          # Seconds to wait for /volume1 at boot
+MAX_WAIT=60                          # Seconds to wait for SSD mount at boot
 
 LOG_TAG="mongodb-ssd-offload"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
     logger -t "$LOG_TAG" "$1"
+}
+
+# Detect the SSD mount point. Firmware 5.0.x and older mount the NVMe at
+# /volume1; 5.1.7+ EA mounts it at /volume/<uuid>/. On success, sets
+# SSD_MOUNT and returns 0. Returns 1 if no SSD mount is found.
+detect_ssd_mount() {
+    if mountpoint -q /volume1 2>/dev/null; then
+        SSD_MOUNT=/volume1
+        return 0
+    fi
+    local d mp
+    for d in /volume/*/; do
+        [ -d "$d" ] || continue
+        mp="${d%/}"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            SSD_MOUNT="$mp"
+            return 0
+        fi
+    done
+    local t
+    t=$(findmnt -no TARGET /dev/md3 2>/dev/null | head -1)
+    if [ -n "$t" ]; then
+        SSD_MOUNT="$t"
+        return 0
+    fi
+    return 1
 }
 
 # Check if already bind-mounted
@@ -35,19 +61,22 @@ if mountpoint -q "$EMMC_DB_DIR" 2>/dev/null; then
     exit 0
 fi
 
-# Wait for /volume1 to be mounted (SSD may take a moment after boot)
+# Wait for an SSD mount to appear (may take a moment after boot)
 waited=0
-while ! mountpoint -q /volume1 2>/dev/null; do
+while ! detect_ssd_mount; do
     if [ "$waited" -ge "$MAX_WAIT" ]; then
-        log "WARNING: /volume1 not mounted after ${MAX_WAIT}s. Falling back to eMMC."
+        log "WARNING: No SSD mount (/volume1 or /volume/<uuid>) found after ${MAX_WAIT}s. Falling back to eMMC."
         exit 0
     fi
     sleep 2
     waited=$((waited + 2))
 done
 
+SSD_DB_DIR="$SSD_MOUNT/$SSD_DB_SUBDIR"
 if [ "$waited" -gt 0 ]; then
-    log "Waited ${waited}s for /volume1 to mount."
+    log "Waited ${waited}s for SSD to mount at $SSD_MOUNT."
+else
+    log "SSD mount: $SSD_MOUNT"
 fi
 
 # Check if SSD copy exists
