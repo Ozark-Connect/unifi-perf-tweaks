@@ -66,6 +66,8 @@ The script reads UniFi Network's own configuration state to decide which heap pr
 
 **IDS vs IPS — why the same heap size?** UniFi groups both modes under the same `services.idsIps.enabled` flag. "Detect only" (IDS) and "Detect and block" (IPS) are distinguished by a separate `mode` field, but both actually run Suricata with the same RAM footprint. So both modes get the 640M profile — there's no separate "IDS only" tier.
 
+**Where to find the toggle in the UI:** Settings → CyberSecure → Intrusion Prevention. The main switch there flips `services.idsIps.enabled` to `true`, and the "Detection Mode" dropdown picks between "Notify" (IDS — detect only) and "Notify and Block" (IPS — detect and block). Either mode triggers the 640M heap profile in this script.
+
 **Detection fallbacks**, in order:
 
 1. **JSON parse of `services.idsIps.enabled`** (primary, reliable at boot and runtime)
