@@ -99,9 +99,9 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 | **UCG-Max** | Likely | Likely | Check `config.fan` | Allowed, unverified | No |
 | **UCG-Ultra** | Likely | Likely | Check `config.fan` | No SSD | No |
 | **UCG-Lite** | Likely | Likely | Check `config.fan` | No SSD | No |
-| **UDM-Pro** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
-| **UDM-SE** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
-| **UDM-Pro Max** | Likely | Likely | Check `config.fan` | **Blocked by model check** | No |
+| **UDM-Pro** | Likely | Likely | Check `config.fan` | **Blocked by model check** (no internal SSD) | No |
+| **UDM-SE** | Likely | Likely | Check `config.fan` | **Blocked by model check** (already on SSD) | No |
+| **UDM-Pro Max** | Likely | Likely | Check `config.fan` | **Blocked by model check** (already on SSD) | No |
 
 "Likely" means the underlying mechanism (systemd, JVM config) should be the same, but paths and device names may differ. **Verify on your device before deploying.**
 
@@ -109,13 +109,14 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 
 "Allowed, unverified" means: the SSD scripts will run on UCG-Max (same NVMe SSD layout as UCG-Fiber, same `unifi-mongodb.service` stack), but no one has soak-tested them on that hardware. If you're running UCG-Max, **make a full controller backup from the UI first**, watch the first reboot carefully, and open an issue if anything misbehaves.
 
-"Blocked by model check" means: the SSD scripts (`20-mongodb-ssd-offload.sh` and `21-mongodb-ssd-backup.sh`) read the device model from `ubnt-device-info` / `/proc/ubnthal/system.info` at the top and refuse to run on anything other than UCG-Fiber or UCG-Max. This is a safety gate — on UDM models, this fix is either unnecessary or potentially destructive:
+"Blocked by model check" means: the SSD scripts (`20-mongodb-ssd-offload.sh` and `21-mongodb-ssd-backup.sh`) read the device model from `ubnt-device-info` / `/proc/ubnthal/system.info` at the top and refuse to run on anything other than UCG-Fiber or UCG-Max. On UDM models the reasoning depends on the specific hardware:
 
-- **UDM-SE is confirmed to already run MongoDB on its internal SSD.** On a UDM-SE, `/dev/sda5` (the 119 GB SATA SSD) is mounted at `/ssd1`, and MongoDB data lives at `/ssd1/.data/unifi/data/db`. There is no eMMC to offload *from* — Ubiquiti already put the database on the fast storage. Running the SSD scripts would be pointless at best.
-- **UDM-Pro and UDM-Pro Max likely have the same arrangement** (internal HDD or SSD bay used for `/data`), but we haven't first-hand verified those models. The model check refuses them as well out of caution.
-- **The storage paths don't match our detection logic.** UDM-SE uses `/ssd1`, not `/volume1` or `/volume/<uuid>/`, and there's no `/dev/md3` for the findmnt fallback to catch. So `detect_ssd_mount()` would return failure anyway — but the explicit model check makes the refusal obvious in the logs instead of a cryptic "no SSD mount found" message.
+- **UDM-SE: already on SSD, confirmed.** On a UDM-SE, `/dev/sda5` (the 119 GB internal SATA SSD) is mounted at `/ssd1`, and MongoDB data lives at `/ssd1/.data/unifi/data/db`. Ubiquiti already put the database on the fast storage — there's nothing to offload. Running these scripts is pointless.
+- **UDM-Pro Max: same arrangement, inferred.** UDM-Pro Max ships with an internal SSD and almost certainly uses the same layout as UDM-SE, though we haven't first-hand verified it.
+- **UDM-Pro: no internal SSD.** UDM-Pro has no built-in SSD — MongoDB runs on eMMC by default (same class of problem as UCG-Fiber). Users typically add their own drive to the 3.5" bay. In principle this fix *could* apply, but the storage layout on a UDM-Pro with a user-added drive is different enough that the scripts would need real adaptation and testing on that hardware. The model check refuses it for now.
+- **The detection logic wouldn't help here anyway.** UDM-SE uses `/ssd1`, not `/volume1` or `/volume/<uuid>/`, and there's no `/dev/md3` for the findmnt fallback. So `detect_ssd_mount()` would return failure on its own — but the explicit model check surfaces the refusal clearly in logs instead of a cryptic "no SSD mount found".
 
-If you're on a UDM model and experiencing eMMC-style symptoms like those in [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md), this probably isn't the right fix. Check what `/data` is actually backed by first (`findmnt /data` or `lsblk`) and look elsewhere for the cause. If you're on a different model entirely and want to adapt these scripts, edit the model check block and extend `detect_ssd_mount()` to find your SSD — but do that manually and test, don't just deploy.
+If you're on a UDM-SE or UDM-Pro Max and experiencing eMMC-style symptoms like those in [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md), this isn't the right fix — your MongoDB is already on SSD, so whatever you're seeing has a different cause. If you're on a UDM-Pro and want to adapt these scripts for a user-added drive, you'll need to edit the model check and extend `detect_ssd_mount()` — manually, and with real testing, not a blind deploy.
 
 ## Prerequisites
 
