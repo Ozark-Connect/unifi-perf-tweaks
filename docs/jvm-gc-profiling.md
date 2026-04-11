@@ -10,7 +10,7 @@ strings /usr/lib/unifi/lib/unifi | grep "com.oracle.svm"
 # com.oracle.svm.core.VM.Target.Platform=org.graalvm.nativeimage.Platform$LINUX_AARCH64
 ```
 
-This is significant because **most community tuning guides assume it's Android ART** (based on the `-XX:MaxHeapFree` flag in Ubiquiti's service file). That flag is an ART-specific parameter - GraalVM silently ignores it. All tuning advice that adjusts `MaxHeapFree` has zero effect.
+This matters because **most community tuning guides assume it's Android ART** (based on the `-XX:MaxHeapFree` flag in Ubiquiti's service file, which looks ART-adjacent). In fact `-XX:MaxHeapFree` is a real SubstrateVM flag — but it's an **upper bound** on retained free space, not a floor. It can only reduce how much free heap the GC keeps around, it cannot prevent shrinking. All tuning advice that raises `MaxHeapFree` to "give the heap more room" has zero effect for the wrong reason — the flag exists, but doesn't do what those guides think it does.
 
 ## How SubstrateVM Serial GC Works
 
@@ -49,15 +49,15 @@ And `/etc/default/unifi` sets:
 UNIFI_NATIVE_OPTS="... -XX:MaxHeapFree=128M"
 ```
 
-Since `OVERRIDE_OPTS` is appended after `NATIVE_OPTS` on the command line, `MaxHeapFree=0` was always the effective value. But it doesn't matter - **GraalVM ignores both**. Neither `MaxHeapFree` nor `StackSize` are valid GraalVM flags.
+Since `OVERRIDE_OPTS` is appended after `NATIVE_OPTS` on the command line, `MaxHeapFree=0` was always the effective value. But the specific value doesn't matter for shrinking behavior: `MaxHeapFree` is an **upper bound** on retained free space, not a minimum. It caps how much free heap the GC keeps but cannot prevent shrinking below the live data set.
 
-All of the following had no effect:
+All of the following had no measurable effect on the shrink-grow cycle:
 - `MaxHeapFree=128M` (stock)
 - `MaxHeapFree=256M`
 - `MaxHeapFree=512M`
 - `MaxHeapFree=768M`
 
-The actual lever is **`-Xms`**, which sets the committed heap floor.
+The actual lever is locking **`-Xms` == `-Xmx`**, which removes the headroom the Adaptive2 policy needs to shrink into.
 
 ## Profiling Results
 
@@ -113,15 +113,18 @@ The mechanism: a 200-350ms stop-the-world pause freezes the JVM thread that hand
 
 ## Monitoring GC
 
+GC output goes to `/data/unifi/logs/gc.log`, **not** journalctl. The unifi systemd unit has `StandardOutput=append:/usr/lib/unifi/logs/gc.log` (which resolves to `/data/unifi/logs/gc.log` via the usual unifi path aliasing), so `journalctl -u unifi` will not show GC events at all.
+
 ```bash
 # Watch GC events in real time (PrintGC is enabled by default)
-journalctl -u unifi -f | grep -i "gc"
+tail -f /data/unifi/logs/gc.log | grep -i "Full GC"
 
-# Count Full GCs in the last hour
-journalctl -u unifi --since "1 hour ago" | grep -c "Full GC"
+# Count Full GCs since the log was last rotated
+grep -c "Full GC" /data/unifi/logs/gc.log
 
-# Check current heap settings
-ps aux | grep unifi | grep -oP '\-Xm[sx]\S+'
+# Check current heap settings on the running process
+# (the native image runs as "unifi", not "java")
+cat /proc/$(pgrep -x unifi)/cmdline | tr '\0' '\n' | grep -E '^-X'
 ```
 
 ## What Flags Does GraalVM Actually Recognize?
@@ -135,6 +138,6 @@ From SubstrateVM documentation:
 | `-Xss` | **Yes** | Thread stack size |
 | `-XX:+PrintGC` | **Yes** | Print GC events to stdout |
 | `-XX:+ExitOnOutOfMemoryError` | **Yes** | Exit JVM on OOM |
-| `-XX:MaxHeapFree` | **No** | Android ART flag, silently ignored |
+| `-XX:MaxHeapFree` | **Yes (partial)** | Real SubstrateVM flag, but it's an upper-bound cap on retained free space, not a floor. Cannot prevent shrinking. |
 | `-XX:MaxHeapFreeRatio` | **No** | HotSpot flag, not in SubstrateVM |
 | `-XX:StackSize` | **No** | Not a standard flag (use `-Xss`) |

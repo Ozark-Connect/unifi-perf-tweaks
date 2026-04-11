@@ -61,7 +61,7 @@ The JVM heap and non-SSD scripts have lighter verification — see each script's
 
 If you're running a different model (UDM-Pro, UDM-SE, UCG-Max, UCG-Ultra, etc.), **you need to verify before deploying:**
 
-- **eMMC device path** - Scripts reference `/dev/mmcblk0`. Your device may use a different block device.
+- **eMMC device path** - The diagnostic commands in [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) assume `/dev/mmcblk0`. Run `lsblk` first to confirm your device's eMMC path; no boot script hardcodes it, but the research commands do.
 - **SSD mount point** - SSD scripts auto-detect `/volume1` (UniFi OS 5.0.x) and `/volume/<uuid>/` (UniFi OS 5.1.7+ EA), falling back to whatever `/dev/md3` is mounted as. UDM-Pro mounts storage differently (often `/mnt/data` or `/data_ext`) and is not auto-detected - check `lsblk` and `mount` on your device and extend `detect_ssd_mount()` in the script if needed.
 - **MongoDB data path** - Scripts assume `/data/unifi/data/db`. Confirm with `findmnt` or `ls /data/unifi/data/`.
 - **Fan PID categories** - The fan tuning script uses category names from the UCG-Fiber (`cpu`, `hdd`, `rtl8372`, `rtl8261`). Your model will have different hardware and different category names. Always check `config.fan` first - see the [fan tuning docs](docs/fan-control-tuning.md#before-you-apply-check-your-model).
@@ -184,9 +184,9 @@ Each script has detailed documentation in [`docs/`](docs/):
 
 Every script is designed to be safely reversible:
 
-- **journald & JVM heap:** Remove the script from `/data/on_boot.d/` and reboot. The overlay filesystem resets the config files to stock on the next UniFi OS upgrade (or revert manually - see each script's docs).
-- **Fan tuning:** `systemctl restart uhwd` immediately resets to defaults. Or remove and reboot.
-- **MongoDB SSD:** `umount /data/unifi/data/db && systemctl restart unifi` puts MongoDB back on eMMC immediately. For a full paste-ready rollback (services, boot scripts, cron, helper), see [docs/recovery.md](docs/recovery.md).
+- **journald & JVM heap:** The config files (`/etc/systemd/journald.conf`, `/etc/default/unifi`) are on the overlay filesystem but are **preserved across reboots** — removing the boot script alone does not revert them. You must manually restore stock values (see each script's docs for the sed commands) or wait for a UniFi OS upgrade, which resets the overlay. Either way, remove the boot script first so it doesn't re-apply on the next boot.
+- **Fan tuning:** `systemctl restart uhwd` immediately resets `config.fan` to defaults (the fan config lives in SDB runtime state, not a file). Remove the boot script to make it permanent.
+- **MongoDB SSD:** See [docs/recovery.md](docs/recovery.md) for the full paste-ready rollback. The short version is `systemctl stop unifi-mongodb.service && umount /data/unifi/data/db && rm /data/on_boot.d/06-mongodb-ssd-offload.sh && systemctl start unifi` — you must stop `unifi-mongodb.service` first, because `umount` will fail with EBUSY while mongod has files open on the bind mount.
 
 ## Contributing
 

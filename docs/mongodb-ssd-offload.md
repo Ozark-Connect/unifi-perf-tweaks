@@ -45,7 +45,7 @@ On first boot with this script, it:
 3. Sets up the bind mount
 4. Starts the controller
 
-Subsequent boots only do step 3-4 (the copy already exists on SSD).
+Subsequent boots still stop the controller (you can't bind-mount over a live database), but skip the copy since `/volume1/unifi-db/` already exists — so it's steps 1, 3, 4.
 
 ## Verification
 
@@ -78,30 +78,34 @@ du -sh /volume1/unifi-db
 
 **Follow this order exactly. Do not kill mongod or remove the SSD copy until eMMC is confirmed working.**
 
-```bash
-# 1. Stop the controller and wait for MongoDB to fully exit
-systemctl stop unifi
-# Wait until mongod is gone (may take 30-60 seconds)
-for i in $(seq 1 60); do pgrep -x mongod >/dev/null || break; sleep 1; done
-# On some firmware, mongod does not exit with `systemctl stop unifi`.
-# If it's still running at this point, terminate it directly:
-pgrep -x mongod >/dev/null && pkill -TERM -x mongod
-while pgrep -x mongod >/dev/null; do sleep 1; done
+The critical ordering: **stop `unifi-mongodb.service` *before* you `umount`.** The umount will fail with `target is busy` while mongod has open file descriptors on the bind mount, and `systemctl stop unifi` alone does *not* stop mongod — on current firmware, mongod runs under the separate `unifi-mongodb.service` unit, and `unifi.service` only `Requires=` it. Stopping `unifi-mongodb.service` cleanly shuts mongod down (via `ExecStop=/usr/bin/mongod --shutdown`) and cascades to stop `unifi.service` at the same time.
 
-# 2. Unmount the bind mount (exposes original eMMC data underneath)
+```bash
+# 1. Stop the whole stack cleanly. This runs mongod --shutdown,
+#    SIGTERMs the cgroup, and cascades to stop unifi.service.
+systemctl stop unifi-mongodb.service
+
+# 2. Confirm mongod is really gone before unmounting
+pgrep -x mongod && echo STILL_RUNNING || echo STOPPED
+# If STILL_RUNNING, stop — do not proceed. Something is wrong.
+
+# 3. Unmount the bind mount (exposes original eMMC data underneath)
 umount /data/unifi/data/db
 
-# 3. Remove the boot script so it doesn't re-mount on next boot
+# 4. Remove the boot script so it doesn't re-mount on next boot
 rm /data/on_boot.d/06-mongodb-ssd-offload.sh
 
-# 4. Start the controller on eMMC
+# 5. Start the controller on eMMC. systemd will pull unifi-mongodb
+#    back up as a dependency, reading the eMMC data dir.
 systemctl start unifi
 
-# 5. Verify the controller is running and healthy before cleaning up
-systemctl is-active unifi
+# 6. Verify the controller is running and healthy before cleaning up
+systemctl is-active unifi unifi-mongodb
 ```
 
-**Do not delete `/volume1/unifi-db/` until you've confirmed the controller is running on eMMC.** That SSD copy is your safety net. If the eMMC data turns out to be stale or corrupted, you can copy it back.
+**Do not delete `/volume1/unifi-db/` (or `/volume/<uuid>/unifi-db/` on UniFi OS 5.1.7+) until you've confirmed the controller is running on eMMC.** That SSD copy is your safety net. If the eMMC data turns out to be stale or corrupted, you can copy it back.
+
+For a fully paste-ready single-block version of this rollback (including the backup script cleanup from 07), see [recovery.md](recovery.md).
 
 ## Results
 

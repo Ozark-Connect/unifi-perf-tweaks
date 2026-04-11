@@ -153,7 +153,10 @@ Don't deploy boot scripts to a gateway you can't physically reach.
 These scripts were tested on a UCG-Fiber. If you're on a different model, SSH in and run these commands **before deploying anything:**
 
 ```bash
-# 1. Check eMMC device path (scripts reference /dev/mmcblk0)
+# 1. Understand your storage layout. The boot scripts don't hardcode
+#    any eMMC device path, but the diagnostic commands in
+#    docs/emmc-write-pressure.md assume /dev/mmcblk0. Check what your
+#    gateway uses before copy-pasting those.
 lsblk
 
 # 2. Check SSD mount point - scripts auto-detect /volume1 (UniFi OS 5.0.x)
@@ -182,4 +185,4 @@ cat /etc/default/unifi | grep UNIFI_NATIVE
 cat /etc/systemd/journald.conf
 ```
 
-If any paths or device names differ from what the scripts expect, update the variables at the top of the relevant script before deploying. For SSD scripts specifically: the `detect_ssd_mount()` helper handles `/volume1` and `/volume/<uuid>/` automatically, but UDM-Pro's `/mnt/data` or `/data_ext` schemes are not covered - extend the helper or set the mount point manually.
+If any paths or device names differ from what the scripts expect, update the variables at the top of the relevant script before deploying. For the SSD scripts specifically: the `detect_ssd_mount()` helper handles `/volume1` and `/volume/<uuid>/` automatically (the two schemes used by UniFi OS 5.0.x and 5.1.7+ on UCG-Fiber/UCG-Max), but other models may use entirely different paths. Non-UCG-Fiber/UCG-Max models are blocked by a model check at the top of the script regardless — if you need to adapt the scripts for a different model, you'll need to edit both the model check and the detection helper, and verify the actual mount point on your device with `lsblk` and `mount` first.

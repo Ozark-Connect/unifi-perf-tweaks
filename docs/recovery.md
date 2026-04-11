@@ -28,7 +28,7 @@ After that:
 - Boot scripts removed, so the bind mount won't re-establish on the next reboot.
 - Backup cron and helper removed.
 - Controller restarted, running on eMMC.
-- **`/volume1/unifi-db/` and `/volume1/unifi-db-backup/` are left intact as a safety net.** If the eMMC copy turns out to be stale or broken, those directories are your fallback. Once the gateway is confirmed healthy on eMMC, you can `rm -rf` them to reclaim the space.
+- **The SSD copy is left intact as a safety net.** On UniFi OS 5.0.x this lives at `/volume1/unifi-db/` and `/volume1/unifi-db-backup/`; on UniFi OS 5.1.7+ EA it lives at `/volume/<uuid>/unifi-db/` and `/volume/<uuid>/unifi-db-backup/` (the mount path changes between versions — run `findmnt /dev/md3` to find it on your gateway). If the eMMC copy turns out to be stale or broken, those directories are your fallback. Once the gateway is confirmed healthy on eMMC, you can `rm -rf` them to reclaim the space.
 
 ## When this isn't enough
 

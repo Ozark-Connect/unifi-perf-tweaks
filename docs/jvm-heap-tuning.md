@@ -124,47 +124,29 @@ Every unlocked configuration showed the same pattern:
 | `-Xms512M -Xmx768M` | 335M | 155M | Compressed — identical degradation |
 | `-Xms512M -Xmx768M -XX:MaxHeapFree=384M -XX:MinHeapSize=512M` | 343M | 155M | Compressed — MaxHeapFree/MinHeapSize had zero effect |
 
-### The fix: `-Xms` == `-Xmx` (locked heap)
+### Early locked-heap snapshot (85 minutes)
 
-The only way to prevent the Adaptive2 policy from shrinking is to lock the heap: set `-Xms` equal to `-Xmx`. With no room to shrink, the GC retains all free space between collections.
+This was the first checkpoint that confirmed locking `-Xms` == `-Xmx` works. It's historical — the 22.75-hour soak data above is the final result — but the 85-minute numbers are a useful comparison point because they show the first-order behavior before steady-state settling.
 
-#### Locked heap results (`-Xms768M -Xmx768M`)
-
-At 85 minutes (the point where all unlocked configs had fully degraded):
-
-| Metric | Unlocked (best of 3 configs) | **Locked** |
+| Metric | Unlocked (best of 3 configs) | **Locked (at 85 min)** |
 |---|---|---|
 | Full GCs/hr | 26-44 | **10.6** |
 | Full GC interval | 28-79s (compressing) | **345-525s (stable)** |
-| Double-taps | 0-170 | **0** |
 | Heap before GC | 155-195M (compressed) | **329-338M (rock solid)** |
 
-The heap stayed at 329-338M before every Full GC — no compression. Live data stable at 112-119M, giving ~638M headroom that allocations fill over 400-500 seconds before the next Full GC.
-
-### Memory impact
-
-| Resource | Stock | Locked 768M |
-|---|---|---|
-| JVM committed | ~150-200MB | 768MB |
-| System available | ~1,050MB | ~830MB |
-
-The locked heap commits 768MB from startup. On a UCG-Fiber with 2.9GB total RAM, this leaves ~830MB available — comfortable with no Suricata. With Suricata, the script uses 640M (Ubiquiti's stock Xmx) which is known to fit.
-
-### Packet loss impact
-
-**With MongoDB on SSD:** Zero packet loss despite ongoing Full GCs. The eMMC write pressure from MongoDB was the primary cause of packet drops, not JVM GC alone. With MongoDB on SSD, GC pauses (150-350ms) can occasionally drop a single ping but don't cause sustained loss.
-
-**Without MongoDB on SSD:** JVM Full GC pauses compound with eMMC garbage collection to cause real packet loss. If you can't move MongoDB to SSD, JVM heap tuning becomes more important.
+At this early point, the locked heap stayed at 329-338M before every Full GC with no compression. Intervals later tightened as the Adaptive2 policy resized generations internally — see the 22.75-hour numbers above for the steady-state result.
 
 ### Assessment
 
-The locked heap configuration (`-Xms` == `-Xmx`) provides a clear, stable improvement:
-- **4x fewer Full GCs** than any unlocked configuration at steady state
-- **10x longer intervals** (400-500s vs 30-70s)
-- **Zero double-taps** — eliminates the rapid-fire GC storms that cause packet loss blips
-- **No degradation over time** — the heap can't compress because there's nowhere to shrink
+The locked heap configuration (`-Xms` == `-Xmx`) provides a clear, stable improvement over every unlocked configuration tested:
+- **2.3x fewer Full GCs** than the best unlocked config at comparable soak times (22.75hr data)
+- **5.7x fewer double-taps** (170 → 30) — not zero, but a dramatic reduction in the rapid-fire GC storms that cause packet loss blips
+- **Consistent steady-state** (24-42/hr) vs erratic unlocked behavior (28-118/hr)
+- **Total committed heap never compresses** — the Adaptive2 policy still resizes generations internally, but the overall commit floor holds
 
-The eMMC and journald scripts still provide the largest proven improvements for packet loss — deploy those first. JVM heap locking is a secondary optimization that reduces GC frequency and eliminates most double-tap storms.
+The improvement over stock is even larger, but the meaningful comparison is "locked vs best unlocked config" because stock is a baseline nobody should run anyway.
+
+Deployment order: the MongoDB SSD offload (06) and journald volatile (10) scripts target the eMMC write pressure that's the dominant cause of packet loss. JVM heap locking is a complementary fix that reduces GC frequency and eliminates most (not all) double-tap storms. On boot, 05 must run before 06 so the unifi restart triggered by 06 picks up the new heap config in one pass — see [README boot order](../README.md#boot-order).
 
 ## Verification
 
@@ -188,11 +170,22 @@ tail -f /data/unifi/logs/gc.log | grep "Full GC"
 
 ## Reverting
 
-Remove the script from `/data/on_boot.d/` and reboot. The overlay resets `/etc/default/unifi` to stock on UniFi OS upgrade, or you can manually restore:
+`/etc/default/unifi` is on the overlay filesystem, which means the script's edits **persist across reboots**. Simply removing the boot script is not enough — the JVM config stays locked at whatever value the script wrote. The overlay resets to stock only on a UniFi OS upgrade.
+
+To revert immediately:
 
 ```bash
-# Restore stock settings
-sed -i 's/-Xms768M/-Xms128M/' /etc/default/unifi
-sed -i 's/-Xmx768M/-Xmx640M/' /etc/default/unifi
+# Restore stock settings. Handles both the 640M (IPS on) and 768M
+# (IPS off) profiles by matching any -Xms/-Xmx value.
+sed -i 's/-Xms[0-9]\+[MmGg]/-Xms128M/' /etc/default/unifi
+sed -i 's/-Xmx[0-9]\+[MmGg]/-Xmx640M/' /etc/default/unifi
+
+# Restore the stock override flags (stripped by the boot script)
+sed -i 's/^UNIFI_NATIVE_OVERRIDE_OPTS=.*/UNIFI_NATIVE_OVERRIDE_OPTS="-XX:StackSize=512K -XX:MaxHeapFree=0"/' /etc/default/unifi
+
+# Also remove the boot script so it doesn't re-apply on next boot
+rm /data/on_boot.d/05-jvm-heap-tuning.sh
+
+# Restart unifi to pick up the reverted settings
 systemctl restart unifi
 ```

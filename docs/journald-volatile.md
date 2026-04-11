@@ -62,13 +62,17 @@ ls -la /var/log/messages
 
 ## Reverting
 
+`/etc/systemd/journald.conf` is on the overlay filesystem, which means the script's edits **persist across reboots** — simply removing the boot script does not revert them. You need to restore stock values manually, or wait for a UniFi OS upgrade which resets the overlay.
+
 ```bash
+# Restore stock values
 sed -i 's/^Storage=volatile/Storage=persistent/' /etc/systemd/journald.conf
 sed -i 's/^ForwardToSyslog=no/ForwardToSyslog=yes/' /etc/systemd/journald.conf
 systemctl restart systemd-journald
-```
 
-Or simply remove the script from `/data/on_boot.d/` and reboot - the overlay resets `journald.conf` to stock on firmware update.
+# Also remove the boot script so it doesn't re-apply on next boot
+rm /data/on_boot.d/10-journald-volatile.sh
+```
 
 ## Impact
 
