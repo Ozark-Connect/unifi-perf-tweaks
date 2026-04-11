@@ -28,18 +28,30 @@ log() {
 }
 
 # ─── Model check ───
-# Only UCG-Fiber is tested and supported. Other UCG models (UCG-Max) may
-# work but are unverified; non-UCG models (UDM-Pro, UDM-SE, UDM-Pro Max)
-# use entirely different storage layouts and running this script could
-# land a bind mount in the wrong place. Refuse to run on anything else.
-MODEL_INFO="/proc/ubnthal/system.info"
-if [ -r "$MODEL_INFO" ] && grep -qi '^shortname=UCGF$' "$MODEL_INFO"; then
-    : # UCG-Fiber, proceed
-else
-    MODEL_NAME=$(grep -i '^name=' "$MODEL_INFO" 2>/dev/null | cut -d= -f2-)
-    log "Not running: this script is for UCG-Fiber only. Detected: ${MODEL_NAME:-unknown}."
-    exit 0
+# Only UCG-Fiber and UCG-Max are supported. Non-UCG models (UDM-Pro,
+# UDM-SE, UDM-Pro Max) use entirely different storage layouts and
+# running this script could land a bind mount in the wrong place.
+# UCG-Ultra and UCG-Lite have no NVMe SSD to offload to. Refuse to run
+# on anything else.
+#
+# Shortnames appear in multiple forms in the Ubiquiti device registry:
+#   UCG-Fiber: UCG-Fiber, UCGF, UCGFIBER
+#   UCG-Max:   UCG-Max, UCGMAX
+# Match against the full set, case-insensitive. Prefer ubnt-device-info
+# as the canonical source, fall back to /proc/ubnthal/system.info.
+SHORTNAME=$(ubnt-device-info model_short 2>/dev/null)
+if [ -z "$SHORTNAME" ] && [ -r /proc/ubnthal/system.info ]; then
+    SHORTNAME=$(grep -i '^shortname=' /proc/ubnthal/system.info | cut -d= -f2-)
 fi
+case "$(echo "$SHORTNAME" | tr '[:upper:]' '[:lower:]')" in
+    ucg-fiber|ucgf|ucgfiber|ucg-max|ucgmax)
+        : # supported, proceed
+        ;;
+    *)
+        log "Not running: this script supports UCG-Fiber and UCG-Max only. Detected: ${SHORTNAME:-unknown}."
+        exit 0
+        ;;
+esac
 
 # Detect the SSD mount point. Firmware 5.0.x and older mount the NVMe at
 # /volume1; 5.1.7+ EA mounts it at /volume/<uuid>/. On success, sets
