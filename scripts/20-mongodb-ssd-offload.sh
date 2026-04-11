@@ -128,30 +128,39 @@ fi
 # unifi and escalating to SIGTERM if mongod doesn't exit.
 RESTART_UNIFI=false
 stop_mongod_and_unifi() {
+    # Call `systemctl stop` unconditionally rather than gating on
+    # is-active. During boot, the unit is often in the "activating"
+    # state (ExecStartPre=check-repair launches a mongod for repair
+    # purposes, so pgrep sees mongod but is-active returns failure).
+    # systemctl stop correctly handles activating/active/inactive - on
+    # inactive it's a no-op, on activating it waits for the start to
+    # complete then applies the stop.
     if systemctl list-unit-files unifi-mongodb.service >/dev/null 2>&1; then
-        if systemctl is-active --quiet unifi-mongodb.service 2>/dev/null; then
-            log "Stopping unifi-mongodb.service (clean mongod shutdown + cascades to unifi)..."
-            systemctl stop unifi-mongodb.service
-            RESTART_UNIFI=true
-        fi
+        log "Stopping unifi-mongodb.service (clean mongod shutdown + cascades to unifi)..."
+        systemctl stop unifi-mongodb.service
+        RESTART_UNIFI=true
     else
-        if systemctl is-active --quiet unifi 2>/dev/null; then
-            log "Stopping unifi.service (no unifi-mongodb unit present)..."
-            systemctl stop unifi
-            RESTART_UNIFI=true
-            for i in $(seq 1 30); do
-                pgrep -x mongod >/dev/null 2>&1 || break
-                sleep 1
-            done
-            if pgrep -x mongod >/dev/null 2>&1; then
-                log "mongod still running after unifi stop. Sending SIGTERM..."
-                pkill -TERM -x mongod
-                for i in $(seq 1 15); do
-                    pgrep -x mongod >/dev/null 2>&1 || break
-                    sleep 1
-                done
-            fi
-        fi
+        log "Stopping unifi.service (no unifi-mongodb unit present)..."
+        systemctl stop unifi
+        RESTART_UNIFI=true
+        for i in $(seq 1 30); do
+            pgrep -x mongod >/dev/null 2>&1 || break
+            sleep 1
+        done
+    fi
+
+    # Final safety: if mongod is still running for any reason (orphaned
+    # from a prior run, launched outside the unit cgroup, or just slow
+    # to exit), escalate to SIGTERM. systemctl stop above already
+    # disabled Restart=always for this cycle, so there's no respawn
+    # race.
+    if pgrep -x mongod >/dev/null 2>&1; then
+        log "mongod still running. Sending SIGTERM..."
+        pkill -TERM -x mongod
+        for i in $(seq 1 15); do
+            pgrep -x mongod >/dev/null 2>&1 || break
+            sleep 1
+        done
     fi
 
     if pgrep -x mongod >/dev/null 2>&1; then
