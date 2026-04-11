@@ -2,8 +2,6 @@
 
 Performance tuning scripts for UniFi Cloud Gateways (UCG). These address real, measured performance issues - eMMC write pressure causing packet loss, JVM garbage collection stalls, and overly conservative thermal management.
 
-> **This is a private beta.** These scripts have been extensively tested on a production UCG-Fiber, but every network is different. You're here to test and report back.
-
 ---
 
 ## About This Project
