@@ -1,6 +1,6 @@
 # Emergency Recovery - MongoDB SSD Offload
 
-If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you need to get back to stock eMMC behavior, pick the right recovery path below. All three require SSH access to the gateway - which almost always survives any failure mode these scripts can cause, because they don't touch `sshd`, routing, or network config.
+If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you need to get back to stock eMMC behavior, pick the right recovery path below. All four paths require SSH access to the gateway, which almost always survives any failure mode these scripts can cause because they don't touch `sshd`, routing, or network config.
 
 ## Which path should I use?
 
@@ -147,8 +147,13 @@ else
         [ -d "$d" ] && mountpoint -q "${d%/}" 2>/dev/null && { SSD_MOUNT="${d%/}"; break; }
     done
 fi
-if [ -z "$SSD_MOUNT" ] || [ ! -f "$SSD_MOUNT/unifi-db/WiredTiger" ]; then
-    echo "FAIL: cannot find live SSD data at \$SSD_MOUNT/unifi-db"
+if [ -z "$SSD_MOUNT" ]; then
+    echo "FAIL: no SSD mount detected (looked at /volume1 and /volume/*/)"
+    echo "      → use Path B (restore from backup) or Path C (nuclear)"
+    exit 1
+fi
+if [ ! -f "$SSD_MOUNT/unifi-db/WiredTiger" ]; then
+    echo "FAIL: no live SSD data at $SSD_MOUNT/unifi-db (WiredTiger missing)"
     echo "      → use Path B (restore from backup) or Path C (nuclear)"
     exit 1
 fi
