@@ -50,11 +50,43 @@ if [ ! -f "$UNIFI_DEFAULTS" ]; then
     exit 1
 fi
 
-# Detect if Suricata/IPS is configured to run
+# Detect whether Suricata/IPS is configured to run.
+#
+# The UniFi Network IPS/IDS flag lives at services.idsIps.enabled in
+# /data/udapi-config/ubios-udapi-server/ubios-udapi-server.state (a JSON
+# config file persisted across reboots). Reading this file is the only
+# reliable detection at boot time — `pidof suricata` races with
+# Suricata's own startup and will return false if our boot script runs
+# before it, causing us to pick the wrong (larger) heap profile.
+#
+# Parse with python3 + json for correctness; fall back to `pidof
+# suricata` only if we can't read the state file (e.g., missing
+# python3, unusual config path, malformed JSON).
 SURICATA_ACTIVE=false
-if pidof suricata > /dev/null 2>&1; then
-    SURICATA_ACTIVE=true
-elif grep -q "ips.*enabled.*true" /data/udapi-config/ubios-udapi-server/ubios-udapi-server.state 2>/dev/null; then
+STATE_FILE="/data/udapi-config/ubios-udapi-server/ubios-udapi-server.state"
+STATE_CHECKED=false
+
+if command -v python3 >/dev/null 2>&1 && [ -r "$STATE_FILE" ]; then
+    python3 -c "
+import json, sys
+try:
+    with open('$STATE_FILE') as f:
+        state = json.load(f)
+    sys.exit(0 if state.get('services', {}).get('idsIps', {}).get('enabled', False) else 10)
+except Exception:
+    sys.exit(20)
+" >/dev/null 2>&1
+    RC=$?
+    case $RC in
+        0)  SURICATA_ACTIVE=true;  STATE_CHECKED=true ;;
+        10) SURICATA_ACTIVE=false; STATE_CHECKED=true ;;
+        *)  : ;;
+    esac
+fi
+
+# Fallback: process check. Unreliable at boot time but useful for manual
+# live runs and for firmware variants where the state file path differs.
+if [ "$STATE_CHECKED" = false ] && pidof suricata >/dev/null 2>&1; then
     SURICATA_ACTIVE=true
 fi
 
