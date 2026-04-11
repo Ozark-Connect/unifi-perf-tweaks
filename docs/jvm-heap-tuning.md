@@ -51,12 +51,45 @@ This was confirmed by reading the [GraalVM SubstrateVM source code](https://gith
 
 ### Heap Sizes
 
-| IPS Status | Heap (locked) | Rationale |
+| IPS / IDS Status | Heap (locked) | Rationale |
 |---|---|---|
-| **Off** | 768M | ~638MB headroom above ~130MB live data → 400-500s Full GC intervals |
-| **On** | 640M | Matches Ubiquiti's stock Xmx, known to fit alongside Suricata (~778MB) |
+| **Off / Off** | 768M | ~638MB headroom above ~130MB live data → 400-500s Full GC intervals |
+| **IDS on or IPS on** | 640M | Matches Ubiquiti's stock Xmx, known to fit alongside Suricata (~778MB) |
 
 These are configurable at the top of the script.
+
+### How "IPS" Is Detected
+
+The script reads UniFi Network's own configuration state to decide which heap profile to apply. Specifically, it parses `/data/udapi-config/ubios-udapi-server/ubios-udapi-server.state` (a JSON file persisted on `/data`) and checks `services.idsIps.enabled`.
+
+**Why parse the state file and not check for a running process?** Because the boot script runs very early in the startup sequence — well before Suricata's own systemd unit has launched. A `pidof suricata` check at that point reliably returns "nothing", so the script would pick the wrong heap every boot on a gateway that actually has IPS enabled. The JSON state file is persistent across reboots and reflects the *configured* state, not the *currently-running* state, so it's race-free.
+
+**IDS vs IPS — why the same heap size?** UniFi groups both modes under the same `services.idsIps.enabled` flag. "Detect only" (IDS) and "Detect and block" (IPS) are distinguished by a separate `mode` field, but both actually run Suricata with the same RAM footprint. So both modes get the 640M profile — there's no separate "IDS only" tier.
+
+**Detection fallbacks**, in order:
+
+1. **JSON parse of `services.idsIps.enabled`** (primary, reliable at boot and runtime)
+2. **`pidof suricata`** (secondary — only reached if python3 is missing, the state file is unreadable, or JSON parsing raised an exception)
+3. If both fail: default to the no-IPS profile (768M)
+
+The only blind spot is "state file path changes in future firmware *and* the script runs before Suricata starts *and* IPS is actually enabled" — on that combination, the script would silently write 768M on an IPS box. If you hit that, the symptom is memory pressure or OOM after a reboot; mitigation is to edit the `SURICATA_ACTIVE=true` branch at the top of the script directly until the detection is updated.
+
+### Verifying the Detection
+
+To check what the script will decide on your gateway before running it:
+
+```bash
+python3 -c "
+import json
+with open('/data/udapi-config/ubios-udapi-server/ubios-udapi-server.state') as f:
+    state = json.load(f)
+ids = state.get('services', {}).get('idsIps', {})
+print(f\"enabled = {ids.get('enabled', False)}\")
+print(f\"mode    = {ids.get('mode', '(not set)')}\")
+"
+```
+
+`enabled = True` → script will pick **640M**. `enabled = False` or missing → script will pick **768M**.
 
 ### Settings Persistence
 
