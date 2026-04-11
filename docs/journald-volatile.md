@@ -62,7 +62,7 @@ ls -la /var/log/messages
 
 ## Reverting
 
-`/etc/systemd/journald.conf` is on the overlay filesystem, which means the script's edits **persist across reboots** — simply removing the boot script does not revert them. You need to restore stock values manually, or wait for a UniFi OS upgrade which resets the overlay.
+`/etc/systemd/journald.conf` is on the overlay filesystem, which means the script's edits **persist across reboots** - simply removing the boot script does not revert them. You need to restore stock values manually, or wait for a UniFi OS upgrade which resets the overlay.
 
 ```bash
 # Restore stock values

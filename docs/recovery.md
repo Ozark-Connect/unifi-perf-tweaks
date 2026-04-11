@@ -1,6 +1,6 @@
-# Emergency Recovery — MongoDB SSD Offload
+# Emergency Recovery - MongoDB SSD Offload
 
-If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you need to get back to stock eMMC behavior, pick the right recovery path below. All three require SSH access to the gateway — which almost always survives any failure mode these scripts can cause, because they don't touch `sshd`, routing, or network config.
+If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you need to get back to stock eMMC behavior, pick the right recovery path below. All three require SSH access to the gateway - which almost always survives any failure mode these scripts can cause, because they don't touch `sshd`, routing, or network config.
 
 ## Which path should I use?
 
@@ -30,29 +30,29 @@ If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you n
 │                             24h old (SSD daily) or 7d old (eMMC weekly).
 │
 │                    ─→ No  → Path C: Nuclear fallback on the pre-deploy
-│                             snapshot. STALE — potentially weeks or
+│                             snapshot. STALE - potentially weeks or
 │                             months old. Only use if you're about to
 │                             restore from a UniFi Console UI backup
 │                             afterward, or you're OK losing everything
 │                             after the initial offload date.
 ```
 
-> **Every path below is idempotent and safe to re-run.** If you start down one path and decide to switch, just run the next path's snippet — each one starts by stopping the stack cleanly.
+> **Every path below is idempotent and safe to re-run.** If you start down one path and decide to switch, just run the next path's snippet - each one starts by stopping the stack cleanly.
 
 ---
 
-## Path D — First-run install rollback
+## Path D - First-run install rollback
 
 **Use when:** You just deployed `06-mongodb-ssd-offload.sh` for the first time (minutes ago, not days ago), and either:
 - The live-run failed mid-way and left the gateway in a partial state
 - The live-run completed but unifi won't start or is behaving badly
 - You successfully deployed it but changed your mind and want to back out immediately
 
-**Why this is simpler than Path A:** The `cp -a` from `/data/unifi/data/db` to `/volume1/unifi-db/` just happened. No writes have landed on the SSD since, which means the eMMC copy under the bind mount is **byte-identical** to the SSD copy — unmounting exposes *current* data, not the stale pre-deploy snapshot that Path C's warning is about. You don't need to copy anything back to eMMC; the data is already there.
+**Why this is simpler than Path A:** The `cp -a` from `/data/unifi/data/db` to `/volume1/unifi-db/` just happened. No writes have landed on the SSD since, which means the eMMC copy under the bind mount is **byte-identical** to the SSD copy - unmounting exposes *current* data, not the stale pre-deploy snapshot that Path C's warning is about. You don't need to copy anything back to eMMC; the data is already there.
 
 **Pre-conditions:**
-- `06` ran within the last few minutes. If it's been hours or days, use Path A instead — writes have almost certainly landed on the SSD that aren't on eMMC.
-- You haven't deployed `07-mongodb-ssd-backup.sh` *and* had it successfully run a backup yet. (If you have, it's fine — just also run `rm -rf /volume1/unifi-db-backup /data/unifi/data/db-backup` afterward to clean up the unused artifacts.)
+- `06` ran within the last few minutes. If it's been hours or days, use Path A instead - writes have almost certainly landed on the SSD that aren't on eMMC.
+- You haven't deployed `07-mongodb-ssd-backup.sh` *and* had it successfully run a backup yet. (If you have, it's fine - just also run `rm -rf /volume1/unifi-db-backup /data/unifi/data/db-backup` afterward to clean up the unused artifacts.)
 
 **Controller outage:** 10–30 seconds.
 
@@ -96,7 +96,7 @@ fi
 rm -rf /data/unifi/data/db-backup
 
 # 5. Start unifi. systemd pulls unifi-mongodb as a dep and mongod opens
-#    the eMMC copy of the data — which is current, because no writes
+#    the eMMC copy of the data - which is current, because no writes
 #    have happened since the cp.
 systemctl start unifi
 
@@ -108,11 +108,11 @@ EOF
 
 **Result:** Gateway is back to exactly the state it was in before you ran `06`. No stale data, no orphaned SSD directories, no boot scripts queued for next reboot. Tidy.
 
-**If you want to try the install again later:** fine — just re-deploy `06` normally. The SSD directories are gone, so the next run will hit the first-run migration path cleanly.
+**If you want to try the install again later:** fine - just re-deploy `06` normally. The SSD directories are gone, so the next run will hit the first-run migration path cleanly.
 
 ---
 
-## Path A — Live-migrate back to eMMC (happy path)
+## Path A - Live-migrate back to eMMC (happy path)
 
 **Use when:** The SSD and the bind-mounted data are both healthy. You're removing the offload for operational reasons (testing, migrating, debugging), not because anything is broken. This is the right path ~95% of the time.
 
@@ -164,14 +164,14 @@ if [ "$EMMC_FREE_KB" -lt "$((SSD_SIZE_KB * 2))" ]; then
 fi
 
 # 5. Unmount the bind mount. This exposes whatever eMMC data was at
-#    /data/unifi/data/db BEFORE the first bind mount — usually stale.
+#    /data/unifi/data/db BEFORE the first bind mount - usually stale.
 umount /data/unifi/data/db
 
 # 6. Wipe the stale eMMC copy so we can drop in the current SSD data
 rm -rf /data/unifi/data/db/* /data/unifi/data/db/.[!.]*
 
 # 7. Copy the LIVE SSD data back to the eMMC path. The trailing `/.` is
-#    intentional — copies contents, including dot-files, into the
+#    intentional - copies contents, including dot-files, into the
 #    existing target directory.
 cp -a "$SSD_MOUNT/unifi-db/." /data/unifi/data/db/
 chown -R unifi:unifi /data/unifi/data/db
@@ -193,11 +193,11 @@ systemctl is-active unifi unifi-mongodb
 EOF
 ```
 
-**Result:** eMMC now holds the same data the SSD held at rollback time. `/volume1/unifi-db/` and `/volume1/unifi-db-backup/` (or the `/volume/<uuid>/...` equivalents on 5.1.7+) are left intact as a final safety net — delete them manually after you're sure the gateway is healthy on eMMC.
+**Result:** eMMC now holds the same data the SSD held at rollback time. `/volume1/unifi-db/` and `/volume1/unifi-db-backup/` (or the `/volume/<uuid>/...` equivalents on 5.1.7+) are left intact as a final safety net - delete them manually after you're sure the gateway is healthy on eMMC.
 
 ---
 
-## Path B — Restore from backup via `mongorestore`
+## Path B - Restore from backup via `mongorestore`
 
 **Use when:** The SSD is gone, unreachable, or the bind-mounted data is corrupt. At least one of the backup directories from `07` still has a usable dump in it.
 
@@ -271,7 +271,7 @@ fi
 mongorestore --port 27117 --drop "$BACKUP"
 RC=$?
 if [ "$RC" -ne 0 ]; then
-    echo "FAIL: mongorestore exited $RC — DB is in an uncertain state"
+    echo "FAIL: mongorestore exited $RC - DB is in an uncertain state"
     echo "      → inspect /data/unifi/data/db manually or fall back to Path C"
     exit 1
 fi
@@ -283,15 +283,15 @@ systemctl is-active unifi unifi-mongodb
 EOF
 ```
 
-**Result:** eMMC now holds a restored copy of the newest available backup. `/volume1/unifi-db/` is left intact if the SSD was still readable — do not delete it until you've confirmed the restored DB is healthy, in case the restore turns out to be incomplete.
+**Result:** eMMC now holds a restored copy of the newest available backup. `/volume1/unifi-db/` is left intact if the SSD was still readable - do not delete it until you've confirmed the restored DB is healthy, in case the restore turns out to be incomplete.
 
 ---
 
-## Path C — Nuclear fallback (stale pre-deploy snapshot)
+## Path C - Nuclear fallback (stale pre-deploy snapshot)
 
 > ⚠️ **READ THIS FIRST.** This path recovers the eMMC directory as it was at the moment `06-mongodb-ssd-offload.sh` first ran. On a gateway that's been running the SSD offload for weeks or months, that snapshot is **weeks or months out of date**. You will lose everything that happened since the offload was first deployed. Only use this path if you cannot complete Path A or Path B **and** you plan to restore from a UniFi Console UI backup immediately afterward (or you genuinely accept the data loss).
 
-**Use when:** Both Path A and Path B are impossible — the SSD is gone, the bind mount is broken, and neither backup directory has usable data.
+**Use when:** Both Path A and Path B are impossible - the SSD is gone, the bind mount is broken, and neither backup directory has usable data.
 
 ```bash
 ssh root@<gateway-ip> bash -s << 'EOF'
@@ -316,4 +316,4 @@ EOF
 
 ## When this isn't enough
 
-Physical access (reset button) is required only if SSH itself is unreachable — kernel panic, root filesystem corruption, hardware failure, or lost routing. None of those can be caused by these scripts, so in practice if SSH worked before you deployed, it works now.
+Physical access (reset button) is required only if SSH itself is unreachable - kernel panic, root filesystem corruption, hardware failure, or lost routing. None of those can be caused by these scripts, so in practice if SSH worked before you deployed, it works now.

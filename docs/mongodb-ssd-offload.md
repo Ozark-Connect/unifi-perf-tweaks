@@ -45,7 +45,7 @@ On first boot with this script, it:
 3. Sets up the bind mount
 4. Starts the controller
 
-Subsequent boots still stop the controller (you can't bind-mount over a live database), but skip the copy since `/volume1/unifi-db/` already exists — so it's steps 1, 3, 4.
+Subsequent boots still stop the controller (you can't bind-mount over a live database), but skip the copy since `/volume1/unifi-db/` already exists - so it's steps 1, 3, 4.
 
 ## Verification
 
@@ -78,7 +78,7 @@ du -sh /volume1/unifi-db
 
 **Follow this order exactly. Do not kill mongod or remove the SSD copy until eMMC is confirmed working.**
 
-The critical ordering: **stop `unifi-mongodb.service` *before* you `umount`.** The umount will fail with `target is busy` while mongod has open file descriptors on the bind mount, and `systemctl stop unifi` alone does *not* stop mongod — on current firmware, mongod runs under the separate `unifi-mongodb.service` unit, and `unifi.service` only `Requires=` it. Stopping `unifi-mongodb.service` cleanly shuts mongod down (via `ExecStop=/usr/bin/mongod --shutdown`) and cascades to stop `unifi.service` at the same time.
+The critical ordering: **stop `unifi-mongodb.service` *before* you `umount`.** The umount will fail with `target is busy` while mongod has open file descriptors on the bind mount, and `systemctl stop unifi` alone does *not* stop mongod - on current firmware, mongod runs under the separate `unifi-mongodb.service` unit, and `unifi.service` only `Requires=` it. Stopping `unifi-mongodb.service` cleanly shuts mongod down (via `ExecStop=/usr/bin/mongod --shutdown`) and cascades to stop `unifi.service` at the same time.
 
 ```bash
 # 1. Stop the whole stack cleanly. This runs mongod --shutdown,
@@ -87,7 +87,7 @@ systemctl stop unifi-mongodb.service
 
 # 2. Confirm mongod is really gone before unmounting
 pgrep -x mongod && echo STILL_RUNNING || echo STOPPED
-# If STILL_RUNNING, stop — do not proceed. Something is wrong.
+# If STILL_RUNNING, stop - do not proceed. Something is wrong.
 
 # 3. Unmount the bind mount (exposes original eMMC data underneath)
 umount /data/unifi/data/db

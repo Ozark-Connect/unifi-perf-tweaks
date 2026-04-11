@@ -52,12 +52,12 @@ If you're not comfortable SSH-ing into your gateway and recovering from a bad bo
 
 The MongoDB SSD scripts (`06-mongodb-ssd-offload.sh` and `07-mongodb-ssd-backup.sh`) have been end-to-end dogfooded on a UCG-Fiber lab unit against:
 
-- **UniFi OS 5.0.16** / UniFi Network 10.2.105 — first-run migration, warm reboot, cold boot (power cycle) all verified clean.
-- **UniFi OS 5.1.7 EA** / UniFi Network 10.3.47 — OS upgrade from 5.0.16 verified (the SSD mount path auto-migrated from `/volume1` to `/volume/<uuid>/` and the bind mount re-established on boot without intervention), followed by a Network app upgrade to 10.3.47 with no issues.
+- **UniFi OS 5.0.16** / UniFi Network 10.2.105 - first-run migration, warm reboot, cold boot (power cycle) all verified clean.
+- **UniFi OS 5.1.7 EA** / UniFi Network 10.3.47 - OS upgrade from 5.0.16 verified (the SSD mount path auto-migrated from `/volume1` to `/volume/<uuid>/` and the bind mount re-established on boot without intervention), followed by a Network app upgrade to 10.3.47 with no issues.
 
 In addition, the bind-mount approach (the steady-state runtime behavior) has been in continuous use on a personal UCG-Fiber production gateway for several weeks, covering real traffic, Protect coexistence, nightly backups, and the full eMMC-write-pressure scenarios [documented in docs/](docs/emmc-write-pressure.md).
 
-The JVM heap and non-SSD scripts have lighter verification — see each script's own doc for specifics.
+The JVM heap and non-SSD scripts have lighter verification - see each script's own doc for specifics.
 
 If you're running a different model (UDM-Pro, UDM-SE, UCG-Max, UCG-Ultra, etc.), **you need to verify before deploying:**
 
@@ -124,13 +124,13 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 
 "Blocked by model check" means: the SSD scripts (`06-mongodb-ssd-offload.sh` and `07-mongodb-ssd-backup.sh`) read the device model from `ubnt-device-info` / `/proc/ubnthal/system.info` at the top and refuse to run on anything other than UCG-Fiber or UCG-Max. On UDM models the reasoning depends on the specific hardware:
 
-- **UDM-SE: already on SSD, confirmed.** On a UDM-SE, `/dev/sda5` (the 119 GB internal SATA SSD) is mounted at `/ssd1`, and MongoDB data lives at `/ssd1/.data/unifi/data/db`. Ubiquiti already put the database on the fast storage — there's nothing to offload. Running these scripts is pointless.
+- **UDM-SE: already on SSD, confirmed.** On a UDM-SE, `/dev/sda5` (the 119 GB internal SATA SSD) is mounted at `/ssd1`, and MongoDB data lives at `/ssd1/.data/unifi/data/db`. Ubiquiti already put the database on the fast storage - there's nothing to offload. Running these scripts is pointless.
 - **UDM-Pro Max: same arrangement, inferred.** UDM-Pro Max ships with an internal SSD and almost certainly uses the same layout as UDM-SE, though we haven't first-hand verified it.
-- **UDM-Pro: no internal SSD.** UDM-Pro has no built-in SSD — MongoDB runs on eMMC by default (same class of problem as UCG-Fiber). Users typically add their own drive to the 3.5" bay. In principle this fix *could* apply, but the storage layout on a UDM-Pro with a user-added drive is different enough that the scripts would need real adaptation and testing on that hardware. The model check refuses it for now.
-- **UCG-Industrial: no SSD or M.2 slot.** UCG-Industrial ships with a pre-installed 128 GB microSD reserved for NVR, plus a microSD expansion slot — no SATA or NVMe. microSD is slower than eMMC for sustained random writes and is committed to Protect anyway, so there's nothing usable to offload MongoDB to. This fix doesn't apply.
-- **The detection logic wouldn't help here anyway.** UDM-SE uses `/ssd1`, not `/volume1` or `/volume/<uuid>/`, and there's no `/dev/md3` for the findmnt fallback. So `detect_ssd_mount()` would return failure on its own — but the explicit model check surfaces the refusal clearly in logs instead of a cryptic "no SSD mount found".
+- **UDM-Pro: no internal SSD.** UDM-Pro has no built-in SSD - MongoDB runs on eMMC by default (same class of problem as UCG-Fiber). Users typically add their own drive to the 3.5" bay. In principle this fix *could* apply, but the storage layout on a UDM-Pro with a user-added drive is different enough that the scripts would need real adaptation and testing on that hardware. The model check refuses it for now.
+- **UCG-Industrial: no SSD or M.2 slot.** UCG-Industrial ships with a pre-installed 128 GB microSD reserved for NVR, plus a microSD expansion slot - no SATA or NVMe. microSD is slower than eMMC for sustained random writes and is committed to Protect anyway, so there's nothing usable to offload MongoDB to. This fix doesn't apply.
+- **The detection logic wouldn't help here anyway.** UDM-SE uses `/ssd1`, not `/volume1` or `/volume/<uuid>/`, and there's no `/dev/md3` for the findmnt fallback. So `detect_ssd_mount()` would return failure on its own - but the explicit model check surfaces the refusal clearly in logs instead of a cryptic "no SSD mount found".
 
-If you're on a UDM-SE or UDM-Pro Max and experiencing eMMC-style symptoms like those in [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md), this isn't the right fix — your MongoDB is already on SSD, so whatever you're seeing has a different cause. If you're on a UDM-Pro and want to adapt these scripts for a user-added drive, you'll need to edit the model check and extend `detect_ssd_mount()` — manually, and with real testing, not a blind deploy.
+If you're on a UDM-SE or UDM-Pro Max and experiencing eMMC-style symptoms like those in [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md), this isn't the right fix - your MongoDB is already on SSD, so whatever you're seeing has a different cause. If you're on a UDM-Pro and want to adapt these scripts for a user-added drive, you'll need to edit the model check and extend `detect_ssd_mount()` - manually, and with real testing, not a blind deploy.
 
 ## Prerequisites
 
@@ -184,9 +184,9 @@ Each script has detailed documentation in [`docs/`](docs/):
 
 Every script is designed to be safely reversible:
 
-- **journald & JVM heap:** The config files (`/etc/systemd/journald.conf`, `/etc/default/unifi`) are on the overlay filesystem but are **preserved across reboots** — removing the boot script alone does not revert them. You must manually restore stock values (see each script's docs for the sed commands) or wait for a UniFi OS upgrade, which resets the overlay. Either way, remove the boot script first so it doesn't re-apply on the next boot.
+- **journald & JVM heap:** The config files (`/etc/systemd/journald.conf`, `/etc/default/unifi`) are on the overlay filesystem but are **preserved across reboots** - removing the boot script alone does not revert them. You must manually restore stock values (see each script's docs for the sed commands) or wait for a UniFi OS upgrade, which resets the overlay. Either way, remove the boot script first so it doesn't re-apply on the next boot.
 - **Fan tuning:** `systemctl restart uhwd` immediately resets `config.fan` to defaults (the fan config lives in SDB runtime state, not a file). Remove the boot script to make it permanent.
-- **MongoDB SSD:** See [docs/recovery.md](docs/recovery.md) for the full rollback guide. It covers four scenarios, because the right path depends on *why* you're rolling back: **Path D** (first-run install rollback — use when you just deployed `06` and something went wrong, or you changed your mind within minutes), **Path A** (live-migrate back to eMMC with current data — use when the SSD is healthy and you want off the offload after running it for a while, ~95% of rollbacks), **Path B** (mongorestore from the latest `07-mongodb-ssd-backup.sh` dump — use when the SSD or its data is broken), or **Path C** (nuclear fallback on the pre-deploy eMMC snapshot — stale, only use if Paths A and B both fail). In every path, stop `unifi-mongodb.service` *before* `umount` — the unmount fails with EBUSY while mongod has files open on the bind mount, and a plain `systemctl stop unifi` does not stop mongod (it's owned by a separate unit).
+- **MongoDB SSD:** See [docs/recovery.md](docs/recovery.md) for the full rollback guide. It covers four scenarios, because the right path depends on *why* you're rolling back: **Path D** (first-run install rollback - use when you just deployed `06` and something went wrong, or you changed your mind within minutes), **Path A** (live-migrate back to eMMC with current data - use when the SSD is healthy and you want off the offload after running it for a while, ~95% of rollbacks), **Path B** (mongorestore from the latest `07-mongodb-ssd-backup.sh` dump - use when the SSD or its data is broken), or **Path C** (nuclear fallback on the pre-deploy eMMC snapshot - stale, only use if Paths A and B both fail). In every path, stop `unifi-mongodb.service` *before* `umount` - the unmount fails with EBUSY while mongod has files open on the bind mount, and a plain `systemctl stop unifi` does not stop mongod (it's owned by a separate unit).
 
 ## Contributing
 
@@ -199,7 +199,7 @@ This repo is in private beta. If you're testing:
 
 ## Acknowledgments
 
-- [@mark0263](https://github.com/mark0263) — confirmed the UDM-SE storage layout (`/dev/sda5` → `/ssd1`, MongoDB at `/ssd1/.data/unifi/data/db`), which is the basis for the UDM-SE entry in the model compatibility table, and tested the scripts across multiple UniFi OS versions on a UCG-Fiber lab unit, surfacing the boot-time `activating`-state bug in `stop_mongod_and_unifi()` among others.
+- [@mark0263](https://github.com/mark0263) - confirmed the UDM-SE storage layout (`/dev/sda5` → `/ssd1`, MongoDB at `/ssd1/.data/unifi/data/db`), which is the basis for the UDM-SE entry in the model compatibility table, and tested the scripts across multiple UniFi OS versions on a UCG-Fiber lab unit, surfacing the boot-time `activating`-state bug in `stop_mongod_and_unifi()` among others.
 
 ## License
 

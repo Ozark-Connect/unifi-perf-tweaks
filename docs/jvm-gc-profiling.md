@@ -10,7 +10,7 @@ strings /usr/lib/unifi/lib/unifi | grep "com.oracle.svm"
 # com.oracle.svm.core.VM.Target.Platform=org.graalvm.nativeimage.Platform$LINUX_AARCH64
 ```
 
-This matters because **most community tuning guides assume it's Android ART** (based on the `-XX:MaxHeapFree` flag in Ubiquiti's service file, which looks ART-adjacent). In fact `-XX:MaxHeapFree` is a real SubstrateVM flag — but it's an **upper bound** on retained free space, not a floor. It can only reduce how much free heap the GC keeps around, it cannot prevent shrinking. All tuning advice that raises `MaxHeapFree` to "give the heap more room" has zero effect for the wrong reason — the flag exists, but doesn't do what those guides think it does.
+This matters because **most community tuning guides assume it's Android ART** (based on the `-XX:MaxHeapFree` flag in Ubiquiti's service file, which looks ART-adjacent). In fact `-XX:MaxHeapFree` is a real SubstrateVM flag - but it's an **upper bound** on retained free space, not a floor. It can only reduce how much free heap the GC keeps around, it cannot prevent shrinking. All tuning advice that raises `MaxHeapFree` to "give the heap more room" has zero effect for the wrong reason - the flag exists, but doesn't do what those guides think it does.
 
 ## How SubstrateVM Serial GC Works
 
