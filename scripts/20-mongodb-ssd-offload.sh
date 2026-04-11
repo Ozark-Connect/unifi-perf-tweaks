@@ -80,32 +80,52 @@ else
 fi
 
 # Stop unifi and guarantee mongod is fully exited. Sets RESTART_UNIFI=true
-# if we stopped unifi. Returns 0 if mongod is down, 1 if it refused to stop.
+# if we stopped anything. Returns 0 if mongod is down, 1 if it refused.
 #
 # Both the first-run cp and the bind mount need mongod truly down: the cp
 # would otherwise capture a torn WiredTiger snapshot, and the bind mount
-# would clobber a live data directory. On some firmware, `systemctl stop
-# unifi` does not stop mongod - we escalate to SIGTERM and, if that still
-# fails, abort rather than corrupt the database.
+# would clobber a live data directory.
+#
+# On modern firmware, mongod runs under its own systemd unit
+# (unifi-mongodb.service) which includes a bash wrapper, the mongod
+# process, and a watchdog - all in the same cgroup. That unit declares:
+#   - ExecStop=/usr/bin/mongod --shutdown    (clean WiredTiger shutdown)
+#   - KillMode=control-group                  (SIGTERM the whole cgroup)
+#   - Restart=always                          (watchdog respawns on exit)
+# unifi.service declares Requires=unifi-mongodb.service, so stopping
+# unifi-mongodb also cascades to stop unifi. This is the correct and
+# safe way to stop the whole stack: `systemctl stop unifi` alone does
+# NOT stop mongod because they're separate units, and `pkill mongod`
+# would be respawned by systemd within RestartSec.
+#
+# Older firmware without a separate mongodb unit falls back to stopping
+# unifi and escalating to SIGTERM if mongod doesn't exit.
 RESTART_UNIFI=false
 stop_mongod_and_unifi() {
-    if systemctl is-active --quiet unifi 2>/dev/null; then
-        log "Stopping unifi..."
-        systemctl stop unifi
-        RESTART_UNIFI=true
-        for i in $(seq 1 30); do
-            pgrep -x mongod >/dev/null 2>&1 || break
-            sleep 1
-        done
-    fi
-
-    if pgrep -x mongod >/dev/null 2>&1; then
-        log "mongod still running after unifi stop. Sending SIGTERM..."
-        pkill -TERM -x mongod
-        for i in $(seq 1 15); do
-            pgrep -x mongod >/dev/null 2>&1 || break
-            sleep 1
-        done
+    if systemctl list-unit-files unifi-mongodb.service >/dev/null 2>&1; then
+        if systemctl is-active --quiet unifi-mongodb.service 2>/dev/null; then
+            log "Stopping unifi-mongodb.service (clean mongod shutdown + cascades to unifi)..."
+            systemctl stop unifi-mongodb.service
+            RESTART_UNIFI=true
+        fi
+    else
+        if systemctl is-active --quiet unifi 2>/dev/null; then
+            log "Stopping unifi.service (no unifi-mongodb unit present)..."
+            systemctl stop unifi
+            RESTART_UNIFI=true
+            for i in $(seq 1 30); do
+                pgrep -x mongod >/dev/null 2>&1 || break
+                sleep 1
+            done
+            if pgrep -x mongod >/dev/null 2>&1; then
+                log "mongod still running after unifi stop. Sending SIGTERM..."
+                pkill -TERM -x mongod
+                for i in $(seq 1 15); do
+                    pgrep -x mongod >/dev/null 2>&1 || break
+                    sleep 1
+                done
+            fi
+        fi
     fi
 
     if pgrep -x mongod >/dev/null 2>&1; then
