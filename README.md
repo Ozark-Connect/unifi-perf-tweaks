@@ -175,7 +175,7 @@ Every script is designed to be safely reversible:
 
 - **journald & JVM heap:** Remove the script from `/data/on_boot.d/` and reboot. The overlay filesystem resets the config files to stock on the next UniFi OS upgrade (or revert manually - see each script's docs).
 - **Fan tuning:** `systemctl restart uhwd` immediately resets to defaults. Or remove and reboot.
-- **MongoDB SSD:** `umount /data/unifi/data/db && systemctl restart unifi` puts MongoDB back on eMMC immediately.
+- **MongoDB SSD:** `umount /data/unifi/data/db && systemctl restart unifi` puts MongoDB back on eMMC immediately. For a full paste-ready rollback (services, boot scripts, cron, helper), see [docs/recovery.md](docs/recovery.md).
 
 ## Contributing
 
