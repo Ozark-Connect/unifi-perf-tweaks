@@ -79,64 +79,67 @@ else
     log "SSD mount: $SSD_MOUNT"
 fi
 
+# Stop unifi and guarantee mongod is fully exited. Sets RESTART_UNIFI=true
+# if we stopped unifi. Returns 0 if mongod is down, 1 if it refused to stop.
+#
+# Both the first-run cp and the bind mount need mongod truly down: the cp
+# would otherwise capture a torn WiredTiger snapshot, and the bind mount
+# would clobber a live data directory. On some firmware, `systemctl stop
+# unifi` does not stop mongod - we escalate to SIGTERM and, if that still
+# fails, abort rather than corrupt the database.
+RESTART_UNIFI=false
+stop_mongod_and_unifi() {
+    if systemctl is-active --quiet unifi 2>/dev/null; then
+        log "Stopping unifi..."
+        systemctl stop unifi
+        RESTART_UNIFI=true
+        for i in $(seq 1 30); do
+            pgrep -x mongod >/dev/null 2>&1 || break
+            sleep 1
+        done
+    fi
+
+    if pgrep -x mongod >/dev/null 2>&1; then
+        log "mongod still running after unifi stop. Sending SIGTERM..."
+        pkill -TERM -x mongod
+        for i in $(seq 1 15); do
+            pgrep -x mongod >/dev/null 2>&1 || break
+            sleep 1
+        done
+    fi
+
+    if pgrep -x mongod >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
 # Check if SSD copy exists
 if [ -f "$SSD_DB_DIR/WiredTiger" ]; then
     log "SSD copy found. Setting up bind mount."
+    NEEDS_MIGRATION=false
 else
-    log "No SSD copy found. Performing initial migration..."
+    log "No SSD copy found. Will perform initial migration."
+    NEEDS_MIGRATION=true
+fi
 
-    # Stop unifi if running (MongoDB stops with it)
-    if systemctl is-active --quiet unifi 2>/dev/null; then
-        log "Stopping unifi for migration..."
-        systemctl stop unifi
-        # Wait for MongoDB to fully exit
-        for i in $(seq 1 30); do
-            if ! pgrep -x mongod >/dev/null 2>&1; then
-                break
-            fi
-            sleep 1
-        done
-        RESTART_UNIFI=true
-    else
-        RESTART_UNIFI=false
+# Stop mongod before touching anything. Do this once and reuse for both
+# migration and bind mount, so we never run them against a live database.
+if ! stop_mongod_and_unifi; then
+    log "ERROR: mongod still running after SIGTERM. Aborting to avoid corruption."
+    if [ "$RESTART_UNIFI" = true ]; then
+        log "Restarting unifi to restore service on eMMC..."
+        systemctl start unifi
     fi
+    exit 1
+fi
 
-    # Copy eMMC DB to SSD
+# First-run migration: copy eMMC → SSD now that mongod is guaranteed down
+if [ "$NEEDS_MIGRATION" = true ]; then
     mkdir -p "$SSD_DB_DIR"
     log "Copying $EMMC_DB_DIR to $SSD_DB_DIR..."
     cp -a "$EMMC_DB_DIR"/* "$SSD_DB_DIR"/
     log "Migration complete. $(du -sh "$SSD_DB_DIR" | cut -f1) copied."
-fi
-
-# Stop unifi if running (need MongoDB stopped for bind mount)
-if systemctl is-active --quiet unifi 2>/dev/null; then
-    log "Stopping unifi for bind mount..."
-    systemctl stop unifi
-    for i in $(seq 1 30); do
-        if ! pgrep -x mongod >/dev/null 2>&1; then
-            break
-        fi
-        sleep 1
-    done
-    RESTART_UNIFI=true
-fi
-
-# On some firmware, mongod does not exit with `systemctl stop unifi`.
-# If it's still alive, escalate — bind-mounting over a live WiredTiger
-# directory corrupts storage.bson on next start.
-if pgrep -x mongod >/dev/null 2>&1; then
-    log "mongod still running after unifi stop. Sending SIGTERM..."
-    pkill -TERM -x mongod
-    for i in $(seq 1 15); do
-        if ! pgrep -x mongod >/dev/null 2>&1; then
-            break
-        fi
-        sleep 1
-    done
-fi
-if pgrep -x mongod >/dev/null 2>&1; then
-    log "ERROR: mongod still running after SIGTERM. Aborting bind mount to avoid corruption."
-    exit 1
 fi
 
 # Apply bind mount
@@ -146,6 +149,9 @@ if mountpoint -q "$EMMC_DB_DIR" 2>/dev/null; then
     log "Bind mount active: $EMMC_DB_DIR -> $SSD_DB_DIR (SSD)"
 else
     log "ERROR: Bind mount failed. Controller will use eMMC."
+    if [ "$RESTART_UNIFI" = true ]; then
+        systemctl start unifi
+    fi
     exit 1
 fi
 
