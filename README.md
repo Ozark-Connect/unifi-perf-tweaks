@@ -162,6 +162,35 @@ ssh root@<gateway-ip> journalctl --header | grep "File path"
 
 **Deploy one script at a time.** Verify it works before adding the next one.
 
+## Updating
+
+There's no `git` on the UniFi console, so updates have to be pushed manually from your local clone of this repo. The flow mirrors the Quick Start.
+
+On your local machine, pull and review:
+
+```bash
+cd unifi-perf-tweaks
+git pull
+git log --oneline HEAD@{1}..HEAD   # see what changed
+```
+
+Then push whichever scripts were updated (overwriting the existing file is fine):
+
+```bash
+scp scripts/06-mongodb-ssd-offload.sh root@<gateway-ip>:/data/on_boot.d/
+ssh root@<gateway-ip> "chmod +x /data/on_boot.d/06-mongodb-ssd-offload.sh"
+```
+
+When the new version actually takes effect depends on what kind of script it is:
+
+- **Config-file scripts** (`05-jvm-heap-tuning`, `10-journald-volatile`, `15-fan-control-tuning`): the new logic runs on next boot. To apply it right away, re-run the script manually (`ssh root@<gateway-ip> /data/on_boot.d/<script>.sh`). For `05`, you'll also need to `systemctl restart unifi` afterward for the controller to pick up new JVM flags.
+- **SSD offload** (`06`): replacing the script file does not change the live bind mount. The new boot-time logic runs on next boot. You can also re-run it manually, which is idempotent - if the bind mount is already set up, the script exits early without doing anything.
+- **Backup** (`07`): re-run manually to reinstall the cron and the `/data/unifi-db-ssd/backup.sh` helper with the new version. Changes to the backup schedule take effect immediately.
+
+If you've modified a script locally (for example, changed the heap sizes at the top of `05-jvm-heap-tuning.sh`), `git pull` may throw a merge conflict, and overwriting on the gateway with `scp` will lose your edits. Keep a note of any local changes, or track them on a local branch.
+
+There's no version fingerprint baked into the scripts today. If you need to know what version is running on a given gateway, compare the file on the gateway against your local clone, or trust that what you last `scp`'d is what's there.
+
 ## Documentation
 
 Each script has detailed documentation in [`docs/`](docs/):
