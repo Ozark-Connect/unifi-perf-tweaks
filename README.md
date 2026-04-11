@@ -185,6 +185,10 @@ This repo is in private beta. If you're testing:
 3. **Report back** with your gateway model, UniFi OS version, UniFi Network version, and results
 4. If something breaks, document what happened and how you recovered
 
+## Acknowledgments
+
+- [@mark0263](https://github.com/mark0263) — confirmed the UDM-SE storage layout (`/dev/sda5` → `/ssd1`, MongoDB at `/ssd1/.data/unifi/data/db`), which is the basis for the UDM-SE entry in the model compatibility table, and tested the scripts across multiple UniFi OS versions on a UCG-Fiber lab unit, surfacing the boot-time `activating`-state bug in `stop_mongod_and_unifi()` among others.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
