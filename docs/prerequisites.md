@@ -120,9 +120,9 @@ ssh root@<gateway-ip> "chmod +x /data/on_boot.d/10-journald-volatile.sh"
 ssh root@<gateway-ip> /data/on_boot.d/10-journald-volatile.sh
 
 # Monitor for 24 hours, then add JVM tuning
-scp scripts/11-jvm-heap-tuning.sh root@<gateway-ip>:/data/on_boot.d/
-ssh root@<gateway-ip> "chmod +x /data/on_boot.d/11-jvm-heap-tuning.sh"
-ssh root@<gateway-ip> /data/on_boot.d/11-jvm-heap-tuning.sh
+scp scripts/05-jvm-heap-tuning.sh root@<gateway-ip>:/data/on_boot.d/
+ssh root@<gateway-ip> "chmod +x /data/on_boot.d/05-jvm-heap-tuning.sh"
+ssh root@<gateway-ip> /data/on_boot.d/05-jvm-heap-tuning.sh
 ```
 
 ## Boot Order

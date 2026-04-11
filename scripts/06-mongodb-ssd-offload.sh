@@ -1,5 +1,5 @@
 #!/bin/bash
-# 20-mongodb-ssd-offload.sh: Bind-mount MongoDB from NVMe SSD to eliminate eMMC writes
+# 06-mongodb-ssd-offload.sh: Bind-mount MongoDB from NVMe SSD to eliminate eMMC writes
 #
 # MongoDB on eMMC causes cyclical packet loss from bulk delete operations
 # (15,000 docs every 2-3 hours). The eMMC flash controller's garbage collection

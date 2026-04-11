@@ -1,7 +1,7 @@
 #!/bin/bash
-# 21-mongodb-ssd-backup.sh: MongoDB backup to SSD, with optional weekly eMMC sync
+# 07-mongodb-ssd-backup.sh: MongoDB backup to SSD, with optional weekly eMMC sync
 #
-# Companion to 20-mongodb-ssd-offload.sh. Installs a cron that runs:
+# Companion to 06-mongodb-ssd-offload.sh. Installs a cron that runs:
 #  - Daily at 1:30am: mongodump to SSD only (fast, zero eMMC impact)
 #  - Weekly (Sunday 1:35am): mongodump to SSD + copy to eMMC as failover
 #
@@ -12,7 +12,7 @@
 #   backup.sh           # SSD-only mongodump
 #   backup.sh --emmc    # SSD mongodump + copy to eMMC
 #
-# Requires: 20-mongodb-ssd-offload.sh deployed first.
+# Requires: 06-mongodb-ssd-offload.sh deployed first.
 
 # ─── Configuration ───
 SSD_BACKUP_SUBDIR="unifi-db-backup"   # Subdir on the SSD for backups
@@ -26,7 +26,7 @@ log() {
 }
 
 # ─── Model check ───
-# Only UCG-Fiber and UCG-Max are supported. See 20-mongodb-ssd-offload.sh
+# Only UCG-Fiber and UCG-Max are supported. See 06-mongodb-ssd-offload.sh
 # for the rationale and for the set of accepted shortname forms.
 SHORTNAME=$(ubnt-device-info model_short 2>/dev/null)
 if [ -z "$SHORTNAME" ] && [ -r /proc/ubnthal/system.info ]; then
@@ -144,7 +144,7 @@ log "Backup script installed at $BACKUP_SCRIPT"
 # ─── Install cron (overlay, re-created each boot) ───
 CRON_FILE="/etc/cron.d/mongodb-ssd-backup"
 cat > "$CRON_FILE" << EOF
-# MongoDB SSD backup - installed by 21-mongodb-ssd-backup.sh
+# MongoDB SSD backup - installed by 07-mongodb-ssd-backup.sh
 # Logs to /tmp (tmpfs) to avoid eMMC writes
 30 1 * * * root $BACKUP_SCRIPT >> /tmp/mongodb-backup.log 2>&1
 35 1 * * 0 root $BACKUP_SCRIPT --emmc >> /tmp/mongodb-backup.log 2>&1

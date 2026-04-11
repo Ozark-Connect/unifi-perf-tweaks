@@ -1,5 +1,5 @@
 #!/bin/bash
-# 11-jvm-heap-tuning.sh: Tune UniFi controller JVM heap to prevent GC thrashing
+# 05-jvm-heap-tuning.sh: Tune UniFi controller JVM heap to prevent GC thrashing
 #
 # The UniFi controller is a GraalVM Native Image (Liberica NIK, SubstrateVM,
 # Serial GC with Adaptive2 collection policy). The adaptive policy aggressively

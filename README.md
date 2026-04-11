@@ -76,20 +76,21 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 | Script | Boot Order | What It Does | Models | Status |
 |---|---|---|---|---|
+| [`05-jvm-heap-tuning.sh`](scripts/05-jvm-heap-tuning.sh) | 05 | Lock JVM heap to prevent GC thrashing | All UCG | **Testing** |
+| [`06-mongodb-ssd-offload.sh`](scripts/06-mongodb-ssd-offload.sh) | 06 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD | Stable |
+| [`07-mongodb-ssd-backup.sh`](scripts/07-mongodb-ssd-backup.sh) | 07 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
-| [`11-jvm-heap-tuning.sh`](scripts/11-jvm-heap-tuning.sh) | 11 | Lock JVM heap to prevent GC thrashing | All UCG | **Testing** |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
-| [`20-mongodb-ssd-offload.sh`](scripts/20-mongodb-ssd-offload.sh) | 20 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD | Stable |
-| [`21-mongodb-ssd-backup.sh`](scripts/21-mongodb-ssd-backup.sh) | 21 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
 
 ### Boot Order
 
 Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sensible default order. You can renumber to fit your existing boot scripts, but **respect the dependency chain:**
 
-- `10` and `11` have no dependencies - run them early
-- `15` needs `uhwd.service` running (it waits internally, so order doesn't matter much)
-- **`21` must come after `20`** - the backup script depends on the SSD offload being set up
-- `20` benefits from running later (gives the SSD mount time to appear)
+- **`05` must come before `06`** - JVM heap tuning edits `/etc/default/unifi`, and `06` is what triggers the unifi restart that picks up the new config. If `06` runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
+- **`07` must come after `06`** - the backup script depends on the SSD offload being set up.
+- `05`/`06`/`07` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against a stable, bind-mounted, already-restarted environment.
+- `10` and `15` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
+- **If you add your own boot scripts** that touch mongo or unifi (mongodump, API calls, etc.), number them >= `10` so they run after `06` has finished the bind mount and service restart.
 
 ### Model Compatibility
 
@@ -110,7 +111,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 
 "Allowed, unverified" means: the SSD scripts will run on UCG-Max (same NVMe SSD layout as UCG-Fiber, same `unifi-mongodb.service` stack), but no one has soak-tested them on that hardware. If you're running UCG-Max, **make a full controller backup from the UI first**, watch the first reboot carefully, and open an issue if anything misbehaves.
 
-"Blocked by model check" means: the SSD scripts (`20-mongodb-ssd-offload.sh` and `21-mongodb-ssd-backup.sh`) read the device model from `ubnt-device-info` / `/proc/ubnthal/system.info` at the top and refuse to run on anything other than UCG-Fiber or UCG-Max. On UDM models the reasoning depends on the specific hardware:
+"Blocked by model check" means: the SSD scripts (`06-mongodb-ssd-offload.sh` and `07-mongodb-ssd-backup.sh`) read the device model from `ubnt-device-info` / `/proc/ubnthal/system.info` at the top and refuse to run on anything other than UCG-Fiber or UCG-Max. On UDM models the reasoning depends on the specific hardware:
 
 - **UDM-SE: already on SSD, confirmed.** On a UDM-SE, `/dev/sda5` (the 119 GB internal SATA SSD) is mounted at `/ssd1`, and MongoDB data lives at `/ssd1/.data/unifi/data/db`. Ubiquiti already put the database on the fast storage — there's nothing to offload. Running these scripts is pointless.
 - **UDM-Pro Max: same arrangement, inferred.** UDM-Pro Max ships with an internal SSD and almost certainly uses the same layout as UDM-SE, though we haven't first-hand verified it.

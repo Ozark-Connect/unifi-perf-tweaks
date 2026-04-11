@@ -1,6 +1,6 @@
 # mongodb-ssd-offload
 
-**Script:** [`scripts/20-mongodb-ssd-offload.sh`](../scripts/20-mongodb-ssd-offload.sh)
+**Script:** [`scripts/06-mongodb-ssd-offload.sh`](../scripts/06-mongodb-ssd-offload.sh)
 **Compatibility:** UCG models with NVMe SSD (UCG-Fiber, UCG-Max, etc.)
 **Risk level:** Medium - moves database I/O to a different device. Has graceful fallback to eMMC.
 
@@ -92,7 +92,7 @@ while pgrep -x mongod >/dev/null; do sleep 1; done
 umount /data/unifi/data/db
 
 # 3. Remove the boot script so it doesn't re-mount on next boot
-rm /data/on_boot.d/20-mongodb-ssd-offload.sh
+rm /data/on_boot.d/06-mongodb-ssd-offload.sh
 
 # 4. Start the controller on eMMC
 systemctl start unifi

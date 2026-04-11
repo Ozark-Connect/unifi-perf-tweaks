@@ -1,6 +1,6 @@
 # jvm-heap-tuning
 
-**Script:** [`scripts/11-jvm-heap-tuning.sh`](../scripts/11-jvm-heap-tuning.sh)
+**Script:** [`scripts/05-jvm-heap-tuning.sh`](../scripts/05-jvm-heap-tuning.sh)
 **Compatibility:** All UniFi Cloud Gateway models
 **Risk level:** Low - does not restart the controller; settings apply on next restart
 

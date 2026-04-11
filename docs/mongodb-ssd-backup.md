@@ -1,9 +1,9 @@
 # mongodb-ssd-backup
 
-**Script:** [`scripts/21-mongodb-ssd-backup.sh`](../scripts/21-mongodb-ssd-backup.sh)
+**Script:** [`scripts/07-mongodb-ssd-backup.sh`](../scripts/07-mongodb-ssd-backup.sh)
 **Compatibility:** Same as mongodb-ssd-offload (UCG models with NVMe SSD)
 **Risk level:** Low - backup-only, does not modify the running database
-**Depends on:** [`20-mongodb-ssd-offload.sh`](../scripts/20-mongodb-ssd-offload.sh) must be deployed first
+**Depends on:** [`06-mongodb-ssd-offload.sh`](../scripts/06-mongodb-ssd-offload.sh) must be deployed first
 
 > **Note on SSD mount paths:** Examples in this doc use `/volume1` for clarity, but the script auto-detects the SSD mount point. UniFi OS 5.0.x and earlier use `/volume1`; UniFi OS 5.1.7 EA and newer use `/volume/<uuid>/`. See [mongodb-ssd-offload.md](mongodb-ssd-offload.md) for details.
 
