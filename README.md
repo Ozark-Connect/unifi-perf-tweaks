@@ -207,6 +207,16 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [jvm-gc-profiling.md](docs/jvm-gc-profiling.md) - GraalVM Serial GC profiling results and analysis
 - [prerequisites.md](docs/prerequisites.md) - Gateway setup, udm-boot, firmware compatibility
 
+### Diagnostics
+
+Read-only snapshot of memory, tmpfs, journald volatile cap, OOM events, and UniFi JVM heap:
+
+```bash
+ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/memory-report.sh
+```
+
+Useful for confirming the volatile journal is capped, the JVM is within `-Xmx`, and nothing is leaking before/after deploying the tweaks.
+
 ## Reverting
 
 Every script is designed to be safely reversible:
