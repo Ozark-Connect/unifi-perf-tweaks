@@ -37,13 +37,13 @@ log() {
 #   cpu:     100 → 65   (fan engages much earlier)
 #   hdd:      68 → 55   (protect NVMe/eMMC)
 #   rtl8372: 109 → 85   (10G switch chip)
-#   rtl8261: 103 → 80   (SFP+ PHY)
+#   rtl8261: 103 → 90   (SFP+ PHY)
 #   standby:  20 → 30   (min PWM to avoid fan cycling on/off)
 
 CPU_SETPOINT=65
 HDD_SETPOINT=55
 RTL8372_SETPOINT=85
-RTL8261_SETPOINT=80
+RTL8261_SETPOINT=90
 STANDBY=30
 
 # ─── Wait for uhwd.service ───
