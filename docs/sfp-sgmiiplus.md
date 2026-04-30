@@ -1,0 +1,217 @@
+# sfp-sgmiiplus
+
+**Script:** [`scripts/20-sfp-sgmiiplus.sh`](../scripts/20-sfp-sgmiiplus.sh)
+**Module:** [`modules/force-uniphy1-sgmiiplus/`](../modules/force-uniphy1-sgmiiplus/)
+**Compatibility:** UXG-Fiber only (IPQ9574, kernel 5.4.213-ui-ipq9574)
+**Risk level:** Medium — kernel module with hardcoded addresses, stops a global polling loop
+**Status:** Testing
+
+## Problem
+
+Certain SFP modules (e.g., Calix 100-05609 GPON SFP) need to operate at 2.5G on the UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, determines its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly advertise — even when the SFP hardware supports 2.5G just fine.
+
+On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) every ~12 seconds that re-reads the SFP EEPROM and forces the port back to SGMII 1G. Even if you could set 2.5G through the normal path, the polling loop would revert it within seconds.
+
+### Why a Kernel Module
+
+The SGMII+ mode set requires kernel-level operations that can't be done from userspace:
+
+- **Clock tree changes** — `clk_set_rate()` and `clk_set_parent()` to switch from 125 MHz (1G) to 312.5 MHz (2.5G)
+- **Uniphy calibration** — a polling loop that waits for a hardware calibration bit after the PLL relock
+- **Stopping the MAC sync polling loop** — requires calling an exported kernel symbol
+
+Raw register writes via `devmem` aren't sufficient because the clock tree and calibration steps require kernel API calls.
+
+## What the Module Does
+
+1. **Stops the MAC sync polling loop** — calls `ssdk_mac_sw_sync_work_stop()` so the SSDK can't revert the mode change
+2. **Sets uniphy1 to SGMII+ mode** — calls `adpt_hppe_uniphy_mode_set(0, 1, 0x0c)` which:
+   - Sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII)
+   - Performs PLL reset/relock sequence (registers 0x780: 0x2bf → 0x2ff, ~200ms)
+   - Updates mode control register 0x46c with SGMII+ flags
+   - Runs software reset and calibration
+   - Sets TX/RX clocks to 312.5 MHz (2.5G)
+3. **On unload** (`rmmod`) — reverts to SGMII 1G (mode 0x0f) and restarts the polling loop
+
+The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
+
+## Important Caveats
+
+### This Is for the 2nd SFP+ Port Only
+
+This module targets **uniphy1 = eth6 = Port 7** — the 2nd SFP+ port on the UXG-Fiber. It does not affect the 1st SFP+ port (uniphy0).
+
+### MAC Sync Polling Is Global
+
+Stopping the MAC sync polling loop is a **global** operation — it stops the polling task for the entire SSDK, not just uniphy1. This **may affect the other SFP+ port's** ability to:
+
+- Recover from link drops
+- Detect hot swaps (SFP module insertion/removal)
+- Re-negotiate after a fiber disconnect/reconnect
+
+**We have not tested these scenarios.** If you rely on the other SFP+ port for critical traffic and need it to recover gracefully from link events, understand that this module may compromise that ability. For a permanently seated SFP that doesn't get swapped, this is a non-issue.
+
+### Firmware-Specific Addresses
+
+The module uses a hardcoded kallsyms address (`0xffffffc008935300`) for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. This address is **specific to kernel 5.4.213-ui-ipq9574** on the UXG-Fiber.
+
+**If Ubiquiti pushes a firmware update that changes the kernel or qca-ssdk module, this address will change and the module will either fail to load or crash the kernel.** You must:
+
+1. Check `/proc/kallsyms` for the new address after any firmware update
+2. Update `UNIPHY_MODE_SET_ADDR` in the source and recompile
+
+The module tries `kallsyms_lookup_name()` first, which would survive address changes — but on 5.4 kernels this function may not resolve local symbols reliably, so the hardcoded fallback exists.
+
+## Pre-Check
+
+Before deploying, SSH into your gateway and verify:
+
+```bash
+# 1. Confirm you're on a UXG-Fiber with the expected kernel
+uname -r
+# Expected: 5.4.213-ui-ipq9574
+
+# 2. Confirm qca-ssdk is loaded (required dependency)
+lsmod | grep qca_ssdk
+# Should show qca_ssdk with a nonzero size
+
+# 3. Confirm the target port exists and check current state
+ip link show eth6
+# Should show eth6 (may be UP or DOWN depending on SFP state)
+
+# 4. Check current clock rate (baseline — should be 125 MHz = 1G, or 0 if no SFP)
+cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
+# Expected: 125000000 (or similar)
+
+# 5. Verify the kallsyms address matches (CRITICAL)
+grep adpt_hppe_uniphy_mode_set /proc/kallsyms
+# Expected: ffffffc008935300 t adpt_hppe_uniphy_mode_set [qca_ssdk]
+# If the address differs, the pre-compiled .ko will not work safely.
+# You must update the source and cross-compile a new module.
+```
+
+**If the kallsyms address does not match `ffffffc008935300`, do not deploy the pre-compiled module.** See [Cross-Compiling](#cross-compiling) below.
+
+## Deployment
+
+### 1. Copy Module to Gateway
+
+```bash
+# From your local machine — create the directory and copy the .ko
+ssh root@<gateway-ip> "mkdir -p /data/sfp-sgmiiplus"
+scp modules/force-uniphy1-sgmiiplus/force_uniphy1_sgmiiplus.ko \
+    root@<gateway-ip>:/data/sfp-sgmiiplus/
+```
+
+### 2. Copy Boot Script
+
+```bash
+scp scripts/20-sfp-sgmiiplus.sh root@<gateway-ip>:/data/on_boot.d/
+ssh root@<gateway-ip> "chmod +x /data/on_boot.d/20-sfp-sgmiiplus.sh"
+```
+
+### 3. Test Run
+
+```bash
+# Load the module (expect a brief ~300ms link flap on eth6)
+ssh root@<gateway-ip> /data/on_boot.d/20-sfp-sgmiiplus.sh
+
+# Check the log
+ssh root@<gateway-ip> cat /var/log/sfp-sgmiiplus.log
+
+# Verify clock rate switched to 2.5G
+ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
+# Expected: 312500000
+```
+
+### 4. Verify Link
+
+```bash
+# Check eth6 link state and speed
+ssh root@<gateway-ip> "ethtool eth6 | grep -i speed"
+# Expected: Speed: 2500Mb/s
+
+# Check module is loaded
+ssh root@<gateway-ip> lsmod | grep force_uniphy1
+```
+
+## Verification
+
+After the module loads (either manually or on boot):
+
+```bash
+# Clock rate — 312500000 = 2.5G, 125000000 = 1G
+cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
+
+# Module loaded
+lsmod | grep force_uniphy1_sgmiiplus
+
+# Boot script log
+cat /var/log/sfp-sgmiiplus.log
+
+# Kernel log (module load messages)
+dmesg | grep force_sgmiiplus
+```
+
+## Reverting
+
+### Immediate (Until Next Reboot)
+
+Unloading the module reverts uniphy1 to SGMII 1G and restarts the MAC sync polling loop:
+
+```bash
+rmmod force_uniphy1_sgmiiplus
+```
+
+Verify the revert:
+
+```bash
+cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
+# Expected: 125000000
+```
+
+### Permanent
+
+Remove the boot script so it doesn't reload on next boot, then unload:
+
+```bash
+rm /data/on_boot.d/20-sfp-sgmiiplus.sh
+rmmod force_uniphy1_sgmiiplus
+```
+
+Optionally clean up the module files:
+
+```bash
+rm -rf /data/sfp-sgmiiplus
+```
+
+## Cross-Compiling
+
+The UXG-Fiber has `make` but **no gcc and no kernel headers** — the module must be cross-compiled on another machine.
+
+### Requirements
+
+- `aarch64-linux-gnu-gcc` (or any ARM64 cross-compiler)
+- Kernel source tree matching `5.4.213-ui-ipq9574` with a matching `.config`
+
+Ubiquiti does not publicly distribute kernel source. Options:
+
+1. Extract `/proc/config.gz` from the gateway (if available) and build a matching 5.4 source tree
+2. Use a Docker-based cross-compilation environment with the extracted config
+
+### Build
+
+```bash
+cd modules/force-uniphy1-sgmiiplus/
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/kernel/source
+```
+
+### Updating the Hardcoded Address
+
+After a firmware update, get the new address from the gateway:
+
+```bash
+grep adpt_hppe_uniphy_mode_set /proc/kallsyms
+```
+
+Update `UNIPHY_MODE_SET_ADDR` in `force_uniphy1_sgmiiplus.c` and rebuild.

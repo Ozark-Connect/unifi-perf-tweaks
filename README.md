@@ -90,6 +90,7 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`07-mongodb-ssd-backup.sh`](scripts/07-mongodb-ssd-backup.sh) | 07 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
+| [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UXG-Fiber only | **Testing** |
 
 ### Boot Order
 
@@ -98,21 +99,22 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 - **`05` must come before `06`** - JVM heap tuning edits `/etc/default/unifi`, and `06` is what triggers the unifi restart that picks up the new config. If `06` runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
 - **`07` must come after `06`** - the backup script depends on the SSD offload being set up.
 - `05`/`06`/`07` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against a stable, bind-mounted, already-restarted environment.
-- `10` and `15` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
+- `10`, `15`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
 - **If you add your own boot scripts** that touch mongo or unifi (mongodump, API calls, etc.), number them >= `10` so they run after `06` has finished the bind mount and service restart.
 
 ### Model Compatibility
 
-| Model | journald | JVM heap | Fan tuning | MongoDB SSD | Tested? |
-|---|---|---|---|---|---|
-| **UCG-Fiber** | Yes | Yes | Yes | Yes | **Yes** |
-| **UCG-Max** | Likely | Likely | Check `config.fan` | Allowed, unverified | No |
-| **UCG-Ultra** | Likely | Likely | Check `config.fan` | No SSD | No |
-| **UCG-Lite** | Likely | Likely | Check `config.fan` | No SSD | No |
-| **UCG-Industrial** | Likely | Likely | Check `config.fan` | **Blocked by model check** (no SSD, microSD reserved for NVR) | No |
-| **UDM-Pro** | Likely | Likely | Check `config.fan` | **Blocked by model check** (no internal SSD) | No |
-| **UDM-SE** | Likely | Likely | Check `config.fan` | **Blocked by model check** (already on SSD) | No |
-| **UDM-Pro Max** | Likely | Likely | Check `config.fan` | **Blocked by model check** (already on SSD) | No |
+| Model | journald | JVM heap | Fan tuning | MongoDB SSD | SFP+ 2.5G | Tested? |
+|---|---|---|---|---|---|---|
+| **UCG-Fiber** | Yes | Yes | Yes | Yes | Yes | **Yes** |
+| **UXG-Fiber** | Yes | Yes | Yes | No SSD | Yes | **Yes** |
+| **UCG-Max** | Likely | Likely | Check `config.fan` | Allowed, unverified | No | No |
+| **UCG-Ultra** | Likely | Likely | Check `config.fan` | No SSD | No | No |
+| **UCG-Lite** | Likely | Likely | Check `config.fan` | No SSD | No | No |
+| **UCG-Industrial** | Likely | Likely | Check `config.fan` | **Blocked by model check** (no SSD, microSD reserved for NVR) | No | No |
+| **UDM-Pro** | Likely | Likely | Check `config.fan` | **Blocked by model check** (no internal SSD) | No | No |
+| **UDM-SE** | Likely | Likely | Check `config.fan` | **Blocked by model check** (already on SSD) | No | No |
+| **UDM-Pro Max** | Likely | Likely | Check `config.fan` | **Blocked by model check** (already on SSD) | No | No |
 
 "Likely" means the underlying mechanism (systemd, JVM config) should be the same, but paths and device names may differ. **Verify on your device before deploying.**
 
@@ -200,6 +202,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [fan-control-tuning.md](docs/fan-control-tuning.md) - PID controller explained, per-model setup
 - [mongodb-ssd-offload.md](docs/mongodb-ssd-offload.md) - migration, firmware upgrade safety
 - [mongodb-ssd-backup.md](docs/mongodb-ssd-backup.md) - backup schedule, failover strategy
+- [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
 
 ### Research
 
