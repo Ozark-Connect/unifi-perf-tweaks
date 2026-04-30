@@ -13,7 +13,7 @@ The default logging configuration writes every log line to eMMC flash from two i
 
 This doubles (or more) the eMMC write load from logging. Combined with other eMMC writers (MongoDB, ubios-udapi-server), it contributes to flash garbage collection stalls that can drop packets on CPU-attached ports.
 
-Note: UCG models use **syslog-ng**, not rsyslog. Setting `ForwardToSyslog=no` in journald.conf does not stop syslog-ng from writing — it reads journal files directly. Both sources must be addressed.
+Note: UCG models use **syslog-ng**, not rsyslog. Setting `ForwardToSyslog=no` in journald.conf does not stop syslog-ng from writing - it reads journal files directly. Both sources must be addressed.
 
 ## What the Script Does
 
@@ -33,14 +33,14 @@ Journal moves to `/run/log/journal/` (tmpfs in RAM). Logs are available during t
 Comments out `log{}` routes in `/etc/syslog-ng/conf.d/` that write to local eMMC file destinations. The approach:
 
 1. Finds all `destination` definitions writing to `file("/var/log/...")` on eMMC
-2. Excludes destinations writing to `/var/log/ulog/` (tmpfs, not eMMC — see below)
+2. Excludes destinations writing to `/var/log/ulog/` (tmpfs, not eMMC - see below)
 3. Comments out `log{}` lines that reference those eMMC destinations
 4. Leaves destination definitions intact (avoids syslog-ng `persist_name` uniqueness collisions)
 5. Restarts syslog-ng
 
 **What is preserved (NOT commented out):**
-- **Remote syslog forwarding** (`d_udapi_server_remote`) — log lines continue flowing to the console via UDP
-- **`/var/log/ulog/` destinations** — this directory is a firmware-default tmpfs mount (64 MB), not on eMMC
+- **Remote syslog forwarding** (`d_udapi_server_remote`) - log lines continue flowing to the console via UDP
+- **`/var/log/ulog/` destinations** - this directory is a firmware-default tmpfs mount (64 MB), not on eMMC
 
 ### Why `/var/log/ulog/` must be preserved
 
@@ -54,7 +54,7 @@ The `threat_log.conf` syslog-ng config defines a `unix-stream` source on this so
 
 Since `/var/log/ulog/` is tmpfs (verified via `mount | grep ulog`), writing to it has zero eMMC impact. The script explicitly excludes these destinations from pruning.
 
-Both parts are idempotent — if already configured, the script exits without touching anything.
+Both parts are idempotent - if already configured, the script exits without touching anything.
 
 ## Trade-offs
 
@@ -69,13 +69,13 @@ Both parts are idempotent — if already configured, the script exits without to
 - `dmesg` for kernel messages (separate from journald)
 - Remote syslog forwarding to the console (UDP to `d_udapi_server_remote`)
 - IDS/IPS threat alerts flowing to `/var/log/ulog/threat.log` (tmpfs) and forwarded to console
-- UniFi controller logs in `/data/unifi/logs/` (if running on-box) — unaffected
+- UniFi controller logs in `/data/unifi/logs/` (if running on-box) - unaffected
 - RAM usage capped at 40MB by the stock `RuntimeMaxUse=40M` setting
 
 **Why it's acceptable for a gateway:**
 - If it crashes, you SSH in and check `dmesg`
 - Remote syslog to the console captures everything important
-- IDS/IPS alerts continue flowing — threat visibility is not affected
+- IDS/IPS alerts continue flowing - threat visibility is not affected
 - Packet forwarding reliability is more important than log persistence
 
 ## Verification
@@ -111,7 +111,7 @@ ls -la /var/log/messages
 
 ## Reverting
 
-Both `/etc/systemd/journald.conf` and the syslog-ng conf.d files are on the overlay filesystem, which means edits **persist across reboots** — simply removing the boot script does not revert them. You need to restore stock values manually, or wait for a UniFi OS upgrade which resets the overlay.
+Both `/etc/systemd/journald.conf` and the syslog-ng conf.d files are on the overlay filesystem, which means edits **persist across reboots** - simply removing the boot script does not revert them. You need to restore stock values manually, or wait for a UniFi OS upgrade which resets the overlay.
 
 ```bash
 # Part 1: Restore journald stock values
@@ -120,7 +120,7 @@ sed -i 's/^ForwardToSyslog=no/ForwardToSyslog=yes/' /etc/systemd/journald.conf
 systemctl restart systemd-journald
 
 # Part 2: Uncomment syslog-ng log routes
-# The script comments lines with '#log ' — restore them:
+# The script comments lines with '#log ' - restore them:
 for conf in /etc/syslog-ng/conf.d/*.conf; do
     sed -i 's/^#log /log /' "$conf"
 done
