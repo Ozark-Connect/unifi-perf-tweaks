@@ -121,12 +121,24 @@ ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 ### 4. Verify link
 
 ```bash
-# Check eth6 link state and speed
-ssh root@<gateway-ip> "ethtool eth6 | grep -i speed"
-# Expected: Speed: 2500Mb/s
-
 # Check module is loaded
 ssh root@<gateway-ip> lsmod | grep force_uniphy1
+
+# Verify clock rate - this is the real indicator
+ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
+# 312500000 = 2.5G, 125000000 = 1G
+```
+
+### What about ethtool / UniFi Network?
+
+`ethtool eth6` will still show `Speed: 1000Mb/s` and the UniFi Network UI will still report a 1G link. This is expected and will always be the case with this module. The SSDK's MAC-layer speed register is never updated because we bypass the normal `port_speed_set` path entirely - we only change the uniphy SerDes and clock. The link is running at 2.5G at the physical layer regardless of what the software reports.
+
+The uniphy clock rate is the only reliable way to confirm the actual speed:
+
+```bash
+cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
+# 312500000 = SGMII+ 2.5G
+# 125000000 = SGMII 1G
 ```
 
 ## Verification
@@ -134,7 +146,7 @@ ssh root@<gateway-ip> lsmod | grep force_uniphy1
 After the module loads (either manually or on boot):
 
 ```bash
-# Clock rate - 312500000 = 2.5G, 125000000 = 1G
+# Clock rate - the real speed indicator
 cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 
 # Module loaded
