@@ -1,15 +1,17 @@
 /*
- * force_uniphy1_sgmiiplus.c — Force UXG-Fiber uniphy1 (eth6) to SGMII+ 2.5G
+ * force_uniphy1_sgmiiplus.c - Force UCG-Fiber / UXG-Fiber uniphy1 (eth6) to SGMII+ 2.5G
  *
  * Bypasses the SSDK's SFP EEPROM validation by calling the uniphy mode set
  * function directly, skipping the port speed set path that gates on
  * sfp_phy_read_abilities.
  *
- * Target: UXG-Fiber, IPQ9574, kernel 5.4.213-ui-ipq9574
+ * Target: UCG-Fiber / UXG-Fiber, IPQ9574, kernel 5.4.213-ui-ipq9574
  * Module: qca-ssdk.ko must be loaded
  *
- * WARNING: Hardcoded kallsyms addresses are firmware-version-specific.
- *          Update addresses if Ubiquiti pushes a firmware update.
+ * The address of adpt_hppe_uniphy_mode_set changes across UniFi OS versions
+ * (different qca-ssdk.ko builds). kallsyms_lookup_name() resolves the correct
+ * address at runtime, so the module is version-agnostic. If kallsyms lookup
+ * ever fails, the module refuses to load rather than guessing an address.
  *
  * BUILD:   make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
  * LOAD:    insmod force_uniphy1_sgmiiplus.ko
@@ -24,21 +26,20 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Yelcot GPON Bypass Project");
-MODULE_DESCRIPTION("Force UXG-Fiber uniphy1 to SGMII+ 2.5G");
+MODULE_DESCRIPTION("Force UCG-Fiber / UXG-Fiber uniphy1 to SGMII+ 2.5G");
 
 /*
- * From /proc/kallsyms on firmware 5.4.213-ui-ipq9574:
+ * From /proc/kallsyms (address varies by UniFi OS version):
  *
- *   ffffffc0089e2ab0 T ssdk_mac_sw_sync_work_stop    [qca_ssdk]
- *   ffffffc0089e2b0c T ssdk_mac_sw_sync_work_start   [qca_ssdk]
- *   ffffffc008935300 t adpt_hppe_uniphy_mode_set      [qca_ssdk]
+ *   xxxxxxxxxxxxxxxx T ssdk_mac_sw_sync_work_stop    [qca_ssdk]
+ *   xxxxxxxxxxxxxxxx T ssdk_mac_sw_sync_work_start   [qca_ssdk]
+ *   xxxxxxxxxxxxxxxx t adpt_hppe_uniphy_mode_set      [qca_ssdk]
  *
  * The _stop/_start are exported (T), so we can use symbol lookup.
- * adpt_hppe_uniphy_mode_set is local (t), so we hardcode or kallsyms_lookup_name.
+ * adpt_hppe_uniphy_mode_set is local (t), resolved via kallsyms_lookup_name.
  */
 
 /* Exported by qca-ssdk.ko */
-/* Ghidra decompiles as void but x0 passes through to ssdk_phy_priv_data_get(dev_id) */
 extern int ssdk_mac_sw_sync_work_stop(unsigned int dev_id);
 extern int ssdk_mac_sw_sync_work_start(unsigned int dev_id);
 
@@ -48,14 +49,11 @@ extern int ssdk_mac_sw_sync_work_start(unsigned int dev_id);
  * Mode 0x0c = SGMII+ (2.5G)
  * Mode 0x0f = SGMII channel 0 (1G, the default for SFP ports)
  *
- * Not exported — resolve via kallsyms or hardcode.
+ * Not exported - resolved at runtime via kallsyms_lookup_name.
  */
 typedef int (*uniphy_mode_set_fn)(unsigned int dev_id, unsigned int uniphy_index, int mode);
 
 static uniphy_mode_set_fn uniphy_mode_set;
-
-/* Hardcoded fallback — update on firmware change */
-#define UNIPHY_MODE_SET_ADDR 0xffffffc008935300UL
 
 #define SSDK_UNIPHY_SGMIIPLUS 0x0c
 #define SSDK_UNIPHY_SGMII_CH0 0x0f
@@ -68,15 +66,14 @@ static int __init force_sgmiiplus_init(void)
 {
 	int ret;
 
-	/* Try kallsyms first, fall back to hardcoded address */
 	uniphy_mode_set = (uniphy_mode_set_fn)kallsyms_lookup_name(
 		"adpt_hppe_uniphy_mode_set");
 	if (!uniphy_mode_set) {
-		pr_warn("force_sgmiiplus: kallsyms_lookup_name failed, using hardcoded address\n");
-		uniphy_mode_set = (uniphy_mode_set_fn)UNIPHY_MODE_SET_ADDR;
-	} else {
-		pr_info("force_sgmiiplus: resolved adpt_hppe_uniphy_mode_set via kallsyms\n");
+		pr_err("force_sgmiiplus: kallsyms_lookup_name failed for adpt_hppe_uniphy_mode_set, refusing to load\n");
+		return -ENOENT;
 	}
+	pr_info("force_sgmiiplus: resolved adpt_hppe_uniphy_mode_set at %px via kallsyms\n",
+		uniphy_mode_set);
 
 	/*
 	 * Step 1: Stop the MAC sync polling loop.
@@ -103,8 +100,7 @@ static int __init force_sgmiiplus_init(void)
 	 * - Software reset + calibration
 	 * - Clock set to 312.5 MHz (2.5G)
 	 *
-	 * eth6 will flap during this (~300ms). VLAN 4094 (DSMP) drops
-	 * briefly but the SFP re-negotiates automatically.
+	 * eth6 will flap during this (~300ms).
 	 */
 	pr_info("force_sgmiiplus: setting uniphy%d to SGMII+ (mode 0x%x)...\n",
 		UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
@@ -112,7 +108,6 @@ static int __init force_sgmiiplus_init(void)
 	ret = uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
 	if (ret != 0) {
 		pr_err("force_sgmiiplus: uniphy_mode_set failed: %d\n", ret);
-		/* Try to restart polling so we don't leave the system in a bad state */
 		ssdk_mac_sw_sync_work_start(DEV_ID);
 		polling_stopped = false;
 		return ret;
@@ -131,10 +126,6 @@ static void __exit force_sgmiiplus_exit(void)
 	if (!uniphy_mode_set)
 		return;
 
-	/*
-	 * Revert to SGMII 1G (mode 0x0f) and restart polling.
-	 * This restores the default state — link drops to 1G.
-	 */
 	pr_info("force_sgmiiplus: reverting uniphy%d to SGMII 1G...\n", UNIPHY_INDEX);
 
 	ret = uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMII_CH0);

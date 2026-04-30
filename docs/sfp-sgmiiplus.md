@@ -36,9 +36,9 @@ Stopping the MAC sync polling loop is a global operation - it stops the polling 
 
 We have not tested those scenarios. If you rely on the other SFP+ port for critical traffic and need it to recover gracefully from link events, understand that this module may compromise that ability. For a permanently seated SFP that doesn't get swapped, this is a non-issue.
 
-### Firmware-specific addresses
+### Symbol resolution
 
-The module uses a hardcoded kallsyms address for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. All three UniFi OS versions we've tested ship the same kernel (5.4.213-ui-ipq9574), but `qca-ssdk.ko` differs across versions, so the symbol address changes:
+`adpt_hppe_uniphy_mode_set` is a local (unexported) symbol in `qca-ssdk.ko`. Its address changes across UniFi OS versions even though the kernel stays the same - Ubiquiti ships a different `qca-ssdk.ko` build with each release:
 
 | UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
 |---|---|---|
@@ -46,23 +46,17 @@ The module uses a hardcoded kallsyms address for `adpt_hppe_uniphy_mode_set`, wh
 | 5.0.16 | 5.4.213-ui-ipq9574 | `ffffffc00893e300` |
 | 5.1.7 EA | 5.4.213-ui-ipq9574 | `ffffffc00894e200` |
 
-The pre-compiled `.ko` has the 5.0.10 address (`0xffffffc008935300`) baked in as a fallback, but the module tries `kallsyms_lookup_name()` first, which resolves the correct address at runtime regardless of OS version. If `kallsyms_lookup_name` succeeds, the hardcoded address is never used. If it fails, the hardcoded fallback is only safe on 5.0.10 - on any other version it will call the wrong address and likely crash the kernel.
+The module resolves the correct address at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. We've confirmed this on UniFi OS 5.0.10 - `kallsyms_lookup_name` resolves successfully every time. If the lookup ever fails (which we haven't seen), the module refuses to load rather than guessing an address.
 
-After loading the module, check which path it took:
+After loading, confirm the symbol resolved:
 
 ```bash
 dmesg | grep force_sgmiiplus
-# "resolved adpt_hppe_uniphy_mode_set via kallsyms" = good, runtime-resolved
-# "kallsyms_lookup_name failed, using hardcoded address" = fallback, only safe on 5.0.10
+# "resolved adpt_hppe_uniphy_mode_set at <addr> via kallsyms" = good
+# "kallsyms_lookup_name failed" = module refused to load
 ```
 
-We're also investigating whether KASLR (kernel address randomization) moves module addresses between reboots. If it does, the hardcoded fallback is unreliable even on a single OS version, and `kallsyms_lookup_name` becomes the only viable path. This is being tested.
-
-After any firmware update, always verify the address hasn't changed and that `kallsyms_lookup_name` is still resolving correctly:
-
-```bash
-grep adpt_hppe_uniphy_mode_set /proc/kallsyms
-```
+After any firmware update, verify the module still resolves and loads correctly.
 
 ## Pre-check
 
@@ -202,12 +196,4 @@ cd modules/force-uniphy1-sgmiiplus/
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/kernel/source
 ```
 
-### Updating the hardcoded address
-
-After a firmware update, get the new address from the gateway:
-
-```bash
-grep adpt_hppe_uniphy_mode_set /proc/kallsyms
-```
-
-Update `UNIPHY_MODE_SET_ADDR` in `force_uniphy1_sgmiiplus.c` and rebuild.
+Since the module resolves `adpt_hppe_uniphy_mode_set` via `kallsyms_lookup_name()` at runtime, a rebuilt module should work across OS versions without address changes. After a firmware update, just verify the module still loads and resolves correctly via `dmesg`.
