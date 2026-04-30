@@ -2,13 +2,13 @@
 
 **Script:** [`scripts/20-sfp-sgmiiplus.sh`](../scripts/20-sfp-sgmiiplus.sh)
 **Module:** [`modules/force-uniphy1-sgmiiplus/`](../modules/force-uniphy1-sgmiiplus/)
-**Compatibility:** UXG-Fiber only (IPQ9574, kernel 5.4.213-ui-ipq9574)
+**Compatibility:** UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
 **Risk level:** Medium - kernel module with hardcoded addresses, stops a global polling loop
 **Status:** Testing
 
 ## Problem
 
-GPON ONT SFP modules need to run at 2.5G on the UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
+GPON ONT SFP modules need to run at 2.5G on the UCG-Fiber / UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
 
 On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) every ~12 seconds that re-reads the SFP EEPROM and forces the port back to SGMII 1G. Even if you could set 2.5G through the normal path, the polling loop would revert it within seconds.
 
@@ -28,7 +28,7 @@ The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
 ### This is for the 2nd SFP+ port only
 
-This module targets uniphy1 = eth6 = Port 7, the 2nd SFP+ port on the UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0).
+This module targets uniphy1 = eth6 = Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0).
 
 ### MAC sync polling is global
 
@@ -38,7 +38,7 @@ We have not tested those scenarios. If you rely on the other SFP+ port for criti
 
 ### Firmware-specific addresses
 
-The module uses a hardcoded kallsyms address (`0xffffffc008935300`) for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. This address is specific to kernel 5.4.213-ui-ipq9574 on the UXG-Fiber.
+The module uses a hardcoded kallsyms address (`0xffffffc008935300`) for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. This address is specific to kernel 5.4.213-ui-ipq9574 on the UCG-Fiber / UXG-Fiber.
 
 If Ubiquiti pushes a firmware update that changes the kernel or the qca-ssdk module, this address will change and the module will either fail to load or crash the kernel. After any firmware update you need to check `/proc/kallsyms` for the new address, update `UNIPHY_MODE_SET_ADDR` in the source, and recompile.
 
@@ -49,7 +49,7 @@ The module tries `kallsyms_lookup_name()` first, which would survive address cha
 Before deploying, SSH into your gateway and verify:
 
 ```bash
-# 1. Confirm you're on a UXG-Fiber with the expected kernel
+# 1. Confirm you're on a UCG-Fiber / UXG-Fiber with the expected kernel
 uname -r
 # Expected: 5.4.213-ui-ipq9574
 
@@ -169,7 +169,7 @@ rm -rf /data/sfp-sgmiiplus
 
 ## Cross-compiling
 
-The UXG-Fiber has `make` but no gcc and no kernel headers, so the module has to be cross-compiled on another machine.
+The UCG-Fiber / UXG-Fiber has `make` but no gcc and no kernel headers, so the module has to be cross-compiled on another machine.
 
 ### Requirements
 

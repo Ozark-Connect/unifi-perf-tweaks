@@ -14,7 +14,7 @@
 # ability to recover from link drops, hot swaps, or module changes. We have
 # not tested those scenarios.
 #
-# Target: UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
+# Target: UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
 # Requires: qca-ssdk.ko loaded, module pre-deployed to /data/sfp-sgmiiplus/
 
 SCRIPT_NAME="sfp-sgmiiplus"
