@@ -3,7 +3,7 @@
 **Script:** [`scripts/20-sfp-sgmiiplus.sh`](../scripts/20-sfp-sgmiiplus.sh)
 **Module:** [`modules/force-uniphy1-sgmiiplus/`](../modules/force-uniphy1-sgmiiplus/)
 **Compatibility:** UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
-**Risk level:** Medium - kernel module with hardcoded addresses, stops a global polling loop
+**Risk level:** Medium - kernel module, stops a global polling loop
 **Status:** Testing
 
 ## Problem
