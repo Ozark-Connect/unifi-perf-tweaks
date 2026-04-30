@@ -38,7 +38,7 @@ We have not tested those scenarios. If you rely on the other SFP+ port for criti
 
 ### Firmware-specific addresses
 
-The module uses a hardcoded kallsyms address (`0xffffffc008935300`) for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. This address is specific to kernel 5.4.213-ui-ipq9574 on the UCG-Fiber / UXG-Fiber.
+The module uses a hardcoded kallsyms address (`0xffffffc008935300`) for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. This address is specific to kernel 5.4.213-ui-ipq9574 on the UCG-Fiber / UXG-Fiber. We've verified that UniFi OS 5.0.10, 5.0.16, and 5.1.7 EA all ship this same kernel version, but we haven't verified newer releases.
 
 If Ubiquiti pushes a firmware update that changes the kernel or the qca-ssdk module, this address will change and the module will either fail to load or crash the kernel. After any firmware update you need to check `/proc/kallsyms` for the new address, update `UNIPHY_MODE_SET_ADDR` in the source, and recompile.
 
