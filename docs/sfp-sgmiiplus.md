@@ -133,12 +133,22 @@ ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 
 `ethtool eth6` will still show `Speed: 1000Mb/s` and the UniFi Network UI will still report a 1G link. This is expected and will always be the case with this module. The SSDK's MAC-layer speed register is never updated because we bypass the normal `port_speed_set` path entirely - we only change the uniphy SerDes and clock. The link is running at 2.5G at the physical layer regardless of what the software reports.
 
-The uniphy clock rate is the only reliable way to confirm the actual speed:
+The uniphy clock rate and SerDes register are the reliable ways to confirm the actual speed. There's a diagnostic script that checks both SFP+ ports at once:
+
+```bash
+ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/sfp-link-check.sh
+```
+
+Or manually:
 
 ```bash
 cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 # 312500000 = SGMII+ 2.5G
 # 125000000 = SGMII 1G
+
+busybox devmem 0x07A10218 32
+# 0x00000050 = SGMII+ (2.5G)
+# 0x00000030 = SGMII (1G)
 ```
 
 ## Verification

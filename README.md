@@ -220,6 +220,14 @@ ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/memory-report.sh
 
 Useful for confirming the volatile journal is capped, the JVM is within `-Xmx`, and nothing is leaking before/after deploying the tweaks.
 
+SFP+ port status check - reads the uniphy SerDes registers and clock rates for both SFP+ ports:
+
+```bash
+ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/sfp-link-check.sh
+```
+
+Reports the actual physical-layer speed regardless of what `ethtool` or the UniFi UI show. Useful for confirming the SGMII+ module is working (see [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) for why `ethtool` always reports 1G with this module).
+
 ## Reverting
 
 Every script is designed to be safely reversible:
