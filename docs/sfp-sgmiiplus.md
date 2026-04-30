@@ -8,7 +8,7 @@
 
 ## Problem
 
-GPON ONT SFP modules need to run at 2.5G on the UCG-Fiber / UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
+To run optimally for OLT downstream bursts, GPON ONT SFP modules need to run at 2.5G on the UCG-Fiber / UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
 
 On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) every ~12 seconds that re-reads the SFP EEPROM and forces the port back to SGMII 1G. Even if you could set 2.5G through the normal path, the polling loop would revert it within seconds.
 
