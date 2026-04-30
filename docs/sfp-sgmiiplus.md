@@ -38,11 +38,31 @@ We have not tested those scenarios. If you rely on the other SFP+ port for criti
 
 ### Firmware-specific addresses
 
-The module uses a hardcoded kallsyms address (`0xffffffc008935300`) for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. This address is specific to kernel 5.4.213-ui-ipq9574 on the UCG-Fiber / UXG-Fiber. We've verified that UniFi OS 5.0.10, 5.0.16, and 5.1.7 EA all ship this same kernel version, but we haven't verified newer releases.
+The module uses a hardcoded kallsyms address for `adpt_hppe_uniphy_mode_set`, which is a local (unexported) symbol in `qca-ssdk.ko`. All three UniFi OS versions we've tested ship the same kernel (5.4.213-ui-ipq9574), but `qca-ssdk.ko` differs across versions, so the symbol address changes:
 
-If Ubiquiti pushes a firmware update that changes the kernel or the qca-ssdk module, this address will change and the module will either fail to load or crash the kernel. After any firmware update you need to check `/proc/kallsyms` for the new address, update `UNIPHY_MODE_SET_ADDR` in the source, and recompile.
+| UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
+|---|---|---|
+| 5.0.10 | 5.4.213-ui-ipq9574 | `ffffffc008935300` |
+| 5.0.16 | 5.4.213-ui-ipq9574 | `ffffffc00893e300` |
+| 5.1.7 EA | 5.4.213-ui-ipq9574 | `ffffffc00894e200` |
 
-The module tries `kallsyms_lookup_name()` first, which would survive address changes, but on 5.4 kernels this function may not resolve local symbols reliably - so the hardcoded fallback exists.
+The pre-compiled `.ko` has the 5.0.10 address (`0xffffffc008935300`) baked in as a fallback, but the module tries `kallsyms_lookup_name()` first, which resolves the correct address at runtime regardless of OS version. If `kallsyms_lookup_name` succeeds, the hardcoded address is never used. If it fails, the hardcoded fallback is only safe on 5.0.10 - on any other version it will call the wrong address and likely crash the kernel.
+
+After loading the module, check which path it took:
+
+```bash
+dmesg | grep force_sgmiiplus
+# "resolved adpt_hppe_uniphy_mode_set via kallsyms" = good, runtime-resolved
+# "kallsyms_lookup_name failed, using hardcoded address" = fallback, only safe on 5.0.10
+```
+
+We're also investigating whether KASLR (kernel address randomization) moves module addresses between reboots. If it does, the hardcoded fallback is unreliable even on a single OS version, and `kallsyms_lookup_name` becomes the only viable path. This is being tested.
+
+After any firmware update, always verify the address hasn't changed and that `kallsyms_lookup_name` is still resolving correctly:
+
+```bash
+grep adpt_hppe_uniphy_mode_set /proc/kallsyms
+```
 
 ## Pre-check
 
@@ -65,14 +85,12 @@ ip link show eth6
 cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 # Expected: 125000000 (or similar)
 
-# 5. Verify the kallsyms address matches (CRITICAL)
+# 5. Check the kallsyms address for your OS version
 grep adpt_hppe_uniphy_mode_set /proc/kallsyms
-# Expected: ffffffc008935300 t adpt_hppe_uniphy_mode_set [qca_ssdk]
-# If the address differs, the pre-compiled .ko will not work safely.
-# You must update the source and cross-compile a new module.
+# Compare against the table above. If you're on an OS version not listed,
+# the module should still work via kallsyms_lookup_name() at runtime,
+# but check dmesg after loading to confirm it resolved successfully.
 ```
-
-If the kallsyms address does not match `ffffffc008935300`, do not deploy the pre-compiled module. See [Cross-Compiling](#cross-compiling) below.
 
 ## Deployment
 
