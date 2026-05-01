@@ -25,7 +25,7 @@
 #include <linux/kallsyms.h>
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Yelcot GPON Bypass Project");
+MODULE_AUTHOR("Ozark Connect");
 MODULE_DESCRIPTION("Force UCG-Fiber / UXG-Fiber uniphy1 to SGMII+ 2.5G");
 
 /*
