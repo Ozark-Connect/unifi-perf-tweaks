@@ -3,24 +3,26 @@
 **Script:** [`scripts/20-sfp-sgmiiplus.sh`](../scripts/20-sfp-sgmiiplus.sh)
 **Module:** [`modules/force-uniphy1-sgmiiplus/`](../modules/force-uniphy1-sgmiiplus/)
 **Compatibility:** UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
-**Risk level:** Medium - kernel module, stops a global polling loop
-**Status:** Testing
+**Risk level:** Medium - kernel module, modifies SSDK internal state
+**Status:** Production
 
 ## Problem
 
 To run optimally for OLT downstream bursts, GPON ONT SFP modules need to run at 2.5G on the UCG-Fiber / UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
 
-On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) every ~12 seconds that re-reads the SFP EEPROM and forces the port back to SGMII 1G. Even if you could set 2.5G through the normal path, the polling loop would revert it within seconds.
+On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) every ~12 seconds that re-reads the SFP EEPROM and forces the port back to SGMII 1G. Even if you could set 2.5G through the normal path, the polling loop would revert it within seconds. The module solves this by updating the SSDK's internal bookkeeping state to reflect the SGMII+ mode, so the polling loop sees it as the correct state and leaves it alone.
 
 ### Why a kernel module
 
-The SGMII+ mode set requires kernel-level operations that can't be done from userspace. The clock tree changes (`clk_set_rate()` and `clk_set_parent()`) to switch from 125 MHz (1G) to 312.5 MHz (2.5G), the uniphy calibration that polls for a hardware calibration bit after the PLL relock, and stopping the MAC sync polling loop all require calling into the kernel directly. Raw register writes via `devmem` aren't sufficient.
+The SGMII+ mode set requires kernel-level operations that can't be done from userspace. The clock tree changes (`clk_set_rate()` and `clk_set_parent()`) to switch from 125 MHz (1G) to 312.5 MHz (2.5G), the uniphy calibration that polls for a hardware calibration bit after the PLL relock, and updating SSDK internal state all require calling into the kernel directly. Raw register writes via `devmem` aren't sufficient.
 
 ## What the module does
 
-1. Stops the MAC sync polling loop by calling `ssdk_mac_sw_sync_work_stop()` so the SSDK can't revert the mode change
+1. Stops the MAC sync polling loop briefly by calling `ssdk_mac_sw_sync_work_stop()` to prevent races during the mode change
 2. Sets uniphy1 to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, 1, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
-3. On unload (`rmmod`), reverts to SGMII 1G (mode 0x0f) and restarts the polling loop
+3. Updates SSDK bookkeeping so the polling loop sees SGMII+ as the correct mode: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set(0, 5, 6)` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode(0, 1, 0x0c)`
+4. Restarts the MAC sync polling loop via `ssdk_mac_sw_sync_work_start()` -- the loop now manages all ports normally, including eth5
+5. On unload (`rmmod`), reverts all state (uniphy mode, port interface mode, mac_mode) to the original SGMII values and restarts the polling loop
 
 The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
@@ -30,15 +32,21 @@ The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
 This module targets uniphy1 = eth6 = Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0).
 
-### MAC sync polling is global
+### SSDK internal state modification
 
-Stopping the MAC sync polling loop is a global operation - it stops the polling task for the entire SSDK, not just uniphy1. This may affect the other SFP+ port's ability to recover from link drops, detect hot swaps (SFP module insertion/removal), or re-negotiate after a fiber disconnect/reconnect.
+The module writes to two SSDK internal data structures (per-port interface mode and per-uniphy mac_mode) to make the polling loop accept SGMII+ as the correct state. These are the same structures the SSDK itself writes during normal port initialization -- the module just sets them to values the SSDK would never choose on its own because of the EEPROM validation gate.
 
-We have not tested those scenarios. If you rely on the other SFP+ port for critical traffic and need it to recover gracefully from link events, understand that this module may compromise that ability. For a permanently seated SFP that doesn't get swapped, this is a non-issue.
+v1 of this module stopped the MAC sync polling loop entirely instead of updating the bookkeeping. This caused sporadic forwarding drops on eth5 (the other SFP+ port) and loss of flow control during UniFi Network config pushes, because the polling loop manages link state, speed/duplex sync, and flow control for all ports -- not just eth6. If you are running v1 (identifiable by `polling_stopped` in the source or "MAC sync polling stopped" in dmesg without a subsequent "MAC sync polling restarted"), upgrade to v2.
 
 ### Symbol resolution
 
-`adpt_hppe_uniphy_mode_set` is a local (unexported) symbol in `qca-ssdk.ko`. Its address changes across UniFi OS versions even though the kernel stays the same - Ubiquiti ships a different `qca-ssdk.ko` build with each release:
+The module resolves three symbols from `qca-ssdk.ko` at load time. Their addresses change across UniFi OS versions even though the kernel stays the same -- Ubiquiti ships a different `qca-ssdk.ko` build with each release:
+
+| Symbol | Type | Resolution | Purpose |
+|---|---|---|---|
+| `adpt_hppe_uniphy_mode_set` | local (t) | kallsyms | Uniphy SerDes mode set |
+| `_adpt_hppe_port_interface_mode_set` | local (t) | kallsyms | Per-port interface mode bookkeeping |
+| `ssdk_dt_global_set_mac_mode` | exported (T) | extern | Per-uniphy global mac_mode bookkeeping |
 
 | UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
 |---|---|---|
@@ -46,14 +54,14 @@ We have not tested those scenarios. If you rely on the other SFP+ port for criti
 | 5.0.16 | 5.4.213-ui-ipq9574 | `ffffffc00893e300` |
 | 5.1.7 EA | 5.4.213-ui-ipq9574 | `ffffffc00894e200` |
 
-The module resolves the correct address at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. We've confirmed this on UniFi OS 5.0.10 - `kallsyms_lookup_name` resolves successfully every time. If the lookup ever fails (which we haven't seen), the module refuses to load rather than guessing an address.
+The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`, `ssdk_dt_global_set_mac_mode`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
-After loading, confirm the symbol resolved:
+After loading, confirm the symbols resolved:
 
 ```bash
 dmesg | grep force_sgmiiplus
-# "resolved adpt_hppe_uniphy_mode_set at <addr> via kallsyms" = good
-# "kallsyms_lookup_name failed" = module refused to load
+# "resolved all symbols via kallsyms" = good
+# "lookup failed" = module refused to load
 ```
 
 After any firmware update, verify the module still resolves and loads correctly.
@@ -79,11 +87,11 @@ ip link show eth6
 cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 # Expected: 125000000 (or similar)
 
-# 5. Check the kallsyms address for your OS version
-grep adpt_hppe_uniphy_mode_set /proc/kallsyms
-# Compare against the table above. If you're on an OS version not listed,
-# the module should still work via kallsyms_lookup_name() at runtime,
-# but check dmesg after loading to confirm it resolved successfully.
+# 5. Check the kallsyms addresses for your OS version
+grep -E 'adpt_hppe_uniphy_mode_set|_adpt_hppe_port_interface_mode_set|ssdk_dt_global_set_mac_mode' /proc/kallsyms
+# All three symbols should appear. The module resolves them at runtime,
+# so it should work on any OS version where they exist.
+# Check dmesg after loading to confirm all resolved successfully.
 ```
 
 ## Deployment
@@ -131,7 +139,7 @@ ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 
 ### What about ethtool / UniFi Network?
 
-`ethtool eth6` will still show `Speed: 1000Mb/s` and the UniFi Network UI will still report a 1G link. This is expected and will always be the case with this module. The SSDK's MAC-layer speed register is never updated because we bypass the normal `port_speed_set` path entirely - we only change the uniphy SerDes and clock. The link is running at 2.5G at the physical layer regardless of what the software reports.
+`ethtool eth6` will still show `Speed: 1000Mb/s` and the UniFi Network UI will still report a 1G link. This is a cosmetic limitation of the SGMII in-band protocol, not a bug. SGMII's in-band control word has no speed code for 2.5G -- it only defines codes for 10M, 100M, and 1000M. SGMII+ achieves 2.5G by running the same protocol at 3.125 GBaud (vs 1.25 GBaud for SGMII), but the in-band control word still says 1000M. The PPE hardware reads this control word faithfully and reports 1000M to software. The actual data rate is 2.5G, confirmed by the uniphy clock rate and SFP-side diagnostics.
 
 The uniphy clock rate and SerDes register are the reliable ways to confirm the actual speed. There's a diagnostic script that checks both SFP+ ports at once:
 
@@ -218,4 +226,4 @@ cd modules/force-uniphy1-sgmiiplus/
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/kernel/source
 ```
 
-Since the module resolves `adpt_hppe_uniphy_mode_set` via `kallsyms_lookup_name()` at runtime, a rebuilt module should work across OS versions without address changes. After a firmware update, just verify the module still loads and resolves correctly via `dmesg`.
+Since the module resolves local symbols via `kallsyms_lookup_name()` at runtime, a rebuilt module should work across OS versions without address changes. After a firmware update, just verify the module still loads and resolves correctly via `dmesg`.

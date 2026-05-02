@@ -2,16 +2,16 @@
  * force_uniphy1_sgmiiplus.c - Force UCG-Fiber / UXG-Fiber uniphy1 (eth6) to SGMII+ 2.5G
  *
  * Bypasses the SSDK's SFP EEPROM validation by calling the uniphy mode set
- * function directly, skipping the port speed set path that gates on
- * sfp_phy_read_abilities.
+ * function directly, then updates the SSDK bookkeeping state so the MAC sync
+ * polling loop accepts SGMII+ as the correct mode for this port. The loop
+ * continues running and managing link state for all ports (including eth5).
+ *
+ * Previous versions stopped the polling loop entirely, which caused sporadic
+ * forwarding drops on eth5 — the loop handles link-state recovery, MAC
+ * speed/duplex sync, and flow control for all ports on the switch.
  *
  * Target: UCG-Fiber / UXG-Fiber, IPQ9574, kernel 5.4.213-ui-ipq9574
  * Module: qca-ssdk.ko must be loaded
- *
- * The address of adpt_hppe_uniphy_mode_set changes across UniFi OS versions
- * (different qca-ssdk.ko builds). kallsyms_lookup_name() resolves the correct
- * address at runtime, so the module is version-agnostic. If kallsyms lookup
- * ever fails, the module refuses to load rather than guessing an address.
  *
  * BUILD:   make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
  * LOAD:    insmod force_uniphy1_sgmiiplus.ko
@@ -28,39 +28,30 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ozark Connect");
 MODULE_DESCRIPTION("Force UCG-Fiber / UXG-Fiber uniphy1 to SGMII+ 2.5G");
 
-/*
- * From /proc/kallsyms (address varies by UniFi OS version):
- *
- *   xxxxxxxxxxxxxxxx T ssdk_mac_sw_sync_work_stop    [qca_ssdk]
- *   xxxxxxxxxxxxxxxx T ssdk_mac_sw_sync_work_start   [qca_ssdk]
- *   xxxxxxxxxxxxxxxx t adpt_hppe_uniphy_mode_set      [qca_ssdk]
- *
- * The _stop/_start are exported (T), so we can use symbol lookup.
- * adpt_hppe_uniphy_mode_set is local (t), resolved via kallsyms_lookup_name.
- */
-
 /* Exported by qca-ssdk.ko */
 extern int ssdk_mac_sw_sync_work_stop(unsigned int dev_id);
 extern int ssdk_mac_sw_sync_work_start(unsigned int dev_id);
 
-/*
- * adpt_hppe_uniphy_mode_set(uint dev_id, uint uniphy_index, int mode)
- *
- * Mode 0x0c = SGMII+ (2.5G)
- * Mode 0x0f = SGMII channel 0 (1G, the default for SFP ports)
- *
- * Not exported - resolved at runtime via kallsyms_lookup_name.
- */
 typedef int (*uniphy_mode_set_fn)(unsigned int dev_id, unsigned int uniphy_index, int mode);
+typedef int (*port_iface_mode_set_fn)(unsigned int dev_id, unsigned long port_id, int mode);
+typedef int (*dt_global_set_mac_mode_fn)(unsigned long dev_id, int uniphy_index, unsigned int mode);
 
 static uniphy_mode_set_fn uniphy_mode_set;
+static port_iface_mode_set_fn port_iface_mode_set;
+static dt_global_set_mac_mode_fn dt_global_set_mac_mode;
 
 #define SSDK_UNIPHY_SGMIIPLUS 0x0c
 #define SSDK_UNIPHY_SGMII_CH0 0x0f
-#define UNIPHY_INDEX 1  /* uniphy1 = eth6 = SFP+ port */
+#define UNIPHY_INDEX 1
+#define SSDK_PORT_ID 5
 #define DEV_ID 0
 
-static bool polling_stopped;
+/* SGMII+ port interface mode (hsl_uniphy_mode_to_port_mode maps 0x0c -> 6) */
+#define PORT_MODE_SGMIIPLUS 6
+
+/* Original state — restored on unload */
+#define ORIG_PORT_IFACE_MODE 0x0e
+#define ORIG_MAC_MODE 0x14
 
 static int __init force_sgmiiplus_init(void)
 {
@@ -69,75 +60,78 @@ static int __init force_sgmiiplus_init(void)
 	uniphy_mode_set = (uniphy_mode_set_fn)kallsyms_lookup_name(
 		"adpt_hppe_uniphy_mode_set");
 	if (!uniphy_mode_set) {
-		pr_err("force_sgmiiplus: kallsyms_lookup_name failed for adpt_hppe_uniphy_mode_set, refusing to load\n");
+		pr_err("force_sgmiiplus: lookup failed: adpt_hppe_uniphy_mode_set\n");
 		return -ENOENT;
 	}
-	pr_info("force_sgmiiplus: resolved adpt_hppe_uniphy_mode_set at %px via kallsyms\n",
-		uniphy_mode_set);
 
-	/*
-	 * Step 1: Stop the MAC sync polling loop.
-	 *
-	 * The polling task (qca_hppe_mac_sw_sync_task) runs every ~12s,
-	 * reads the SFP EEPROM, and forces SGMII mode. If we don't stop
-	 * it, it will revert our SGMII+ change within seconds.
-	 */
+	port_iface_mode_set = (port_iface_mode_set_fn)kallsyms_lookup_name(
+		"_adpt_hppe_port_interface_mode_set");
+	if (!port_iface_mode_set) {
+		pr_err("force_sgmiiplus: lookup failed: _adpt_hppe_port_interface_mode_set\n");
+		return -ENOENT;
+	}
+
+	dt_global_set_mac_mode = (dt_global_set_mac_mode_fn)kallsyms_lookup_name(
+		"ssdk_dt_global_set_mac_mode");
+	if (!dt_global_set_mac_mode) {
+		pr_err("force_sgmiiplus: lookup failed: ssdk_dt_global_set_mac_mode\n");
+		return -ENOENT;
+	}
+
+	pr_info("force_sgmiiplus: resolved all symbols via kallsyms\n");
+
+	/* Stop loop briefly during the mode change to prevent races */
 	ret = ssdk_mac_sw_sync_work_stop(DEV_ID);
 	if (ret < 0 && ret != -0x13) {
 		pr_err("force_sgmiiplus: ssdk_mac_sw_sync_work_stop failed: %d\n", ret);
 		return ret;
 	}
-	polling_stopped = true;
-	pr_info("force_sgmiiplus: MAC sync polling stopped\n");
 
-	/*
-	 * Step 2: Set uniphy1 to SGMII+ mode (0x0c).
-	 *
-	 * This calls the same code path the SSDK uses internally:
-	 * - Sets uniphy reg 0x218 = 0x50 (SGMII+ SerDes select)
-	 * - PLL reset/relock (reg 0x780: 0x2bf -> 0x2ff, 200ms total)
-	 * - Mode control reg 0x46c updated with SGMII+ flags
-	 * - Software reset + calibration
-	 * - Clock set to 312.5 MHz (2.5G)
-	 *
-	 * eth6 will flap during this (~300ms).
-	 */
-	pr_info("force_sgmiiplus: setting uniphy%d to SGMII+ (mode 0x%x)...\n",
-		UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
-
+	/* Set uniphy1 hardware to SGMII+ — link flaps ~300ms */
 	ret = uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
 	if (ret != 0) {
 		pr_err("force_sgmiiplus: uniphy_mode_set failed: %d\n", ret);
 		ssdk_mac_sw_sync_work_start(DEV_ID);
-		polling_stopped = false;
 		return ret;
 	}
+	pr_info("force_sgmiiplus: uniphy%d set to SGMII+ 2.5G\n", UNIPHY_INDEX);
 
-	pr_info("force_sgmiiplus: uniphy%d set to SGMII+ 2.5G successfully\n", UNIPHY_INDEX);
+	/* Update SSDK bookkeeping so the polling loop sees SGMII+ as correct */
+	port_iface_mode_set(DEV_ID, SSDK_PORT_ID, PORT_MODE_SGMIIPLUS);
+	pr_info("force_sgmiiplus: port %d interface_mode set to 0x%x\n",
+		SSDK_PORT_ID, PORT_MODE_SGMIIPLUS);
+
+	dt_global_set_mac_mode(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
+	pr_info("force_sgmiiplus: uniphy%d mac_mode set to 0x%x\n",
+		UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
+
+	/* Restart the polling loop — it now manages all ports including eth5 */
+	ssdk_mac_sw_sync_work_start(DEV_ID);
+	pr_info("force_sgmiiplus: MAC sync polling restarted\n");
+
 	pr_info("force_sgmiiplus: verify: cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate\n");
-
 	return 0;
 }
 
 static void __exit force_sgmiiplus_exit(void)
 {
-	int ret;
-
 	if (!uniphy_mode_set)
 		return;
 
-	pr_info("force_sgmiiplus: reverting uniphy%d to SGMII 1G...\n", UNIPHY_INDEX);
+	pr_info("force_sgmiiplus: reverting...\n");
 
-	ret = uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMII_CH0);
-	if (ret != 0)
-		pr_err("force_sgmiiplus: revert to SGMII failed: %d\n", ret);
+	ssdk_mac_sw_sync_work_stop(DEV_ID);
 
-	if (polling_stopped) {
-		ssdk_mac_sw_sync_work_start(DEV_ID);
-		pr_info("force_sgmiiplus: MAC sync polling restarted\n");
-	}
+	uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMII_CH0);
 
-	pr_info("force_sgmiiplus: unloaded, uniphy%d back to SGMII 1G\n", UNIPHY_INDEX);
+	if (port_iface_mode_set)
+		port_iface_mode_set(DEV_ID, SSDK_PORT_ID, ORIG_PORT_IFACE_MODE);
+
+	if (dt_global_set_mac_mode)
+		dt_global_set_mac_mode(DEV_ID, UNIPHY_INDEX, ORIG_MAC_MODE);
+
+	ssdk_mac_sw_sync_work_start(DEV_ID);
+	pr_info("force_sgmiiplus: reverted to SGMII 1G, polling restarted\n");
 }
 
 module_init(force_sgmiiplus_init);
