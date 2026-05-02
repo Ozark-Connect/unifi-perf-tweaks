@@ -7,7 +7,7 @@
  * the loop's port bitmap so it can't reconfigure our port's MAC speed (the
  * loop reads 1000 from PPE due to SGMII in-band limitations and would force
  * MAC to 1G, breaking the 2.5G data path). The loop continues managing all
- * other ports (LAN + eth5 WAN) normally.
+ * other ports (LAN + eth5 SFP+ trunk) normally.
  *
  * Target: UCG-Fiber / UXG-Fiber, IPQ9574, kernel 5.4.213-ui-ipq9574
  * Module: qca-ssdk.ko must be loaded

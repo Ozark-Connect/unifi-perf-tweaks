@@ -10,7 +10,7 @@
 
 To run optimally for OLT downstream bursts, GPON ONT SFP modules need to run at 2.5G on the UCG-Fiber / UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
 
-On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) that polls all switch ports every ~400ms. For any port it manages, the loop reads the link speed from a PPE hardware status register and reconfigures the MAC to match. Because SGMII+ has no 2.5G speed code in the SGMII in-band protocol, the PPE always reports 1000M for a 2.5G link. If the loop manages our port, it forces the MAC to 1G -- breaking the 2.5G data path. The module excludes our port from the loop's port bitmap so the loop manages all other ports (LAN, eth5 WAN) but never touches ours.
+On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) that polls all switch ports every ~400ms. For any port it manages, the loop reads the link speed from a PPE hardware status register and reconfigures the MAC to match. Because SGMII+ has no 2.5G speed code in the SGMII in-band protocol, the PPE always reports 1000M for a 2.5G link. If the loop manages our port, it forces the MAC to 1G -- breaking the 2.5G data path. The module excludes our port from the loop's port bitmap so the loop manages all other ports (LAN, eth5 SFP+ trunk) but never touches ours.
 
 ### Why a kernel module
 
@@ -22,7 +22,7 @@ The SGMII+ mode set requires kernel-level operations that can't be done from use
 2. Excludes port 5 (eth6) from the polling loop's port bitmap via `qca_ssdk_port_bmp_set()` -- the loop will skip our port entirely, preventing it from forcing the MAC to 1G
 3. Sets uniphy1 to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, 1, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
 4. Updates SSDK bookkeeping: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set(0, 5, 6)` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode(0, 1, 0x0c)`
-5. Waits 1 second for the link to stabilize after the mode change, then restarts the polling loop -- the loop now manages all other ports (LAN, eth5 WAN) but skips port 5
+5. Waits 1 second for the link to stabilize after the mode change, then restarts the polling loop -- the loop now manages all other ports (LAN, eth5 SFP+ trunk) but skips port 5
 6. On unload (`rmmod`), reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap) to the original values and restarts the polling loop with the full port set
 
 The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
@@ -35,7 +35,7 @@ This module targets uniphy1 = eth6 = Port 7, the 2nd SFP+ port on the UCG-Fiber 
 
 ### Port bitmap exclusion
 
-The module removes port 5 (eth6) from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory -- it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports (LAN and eth5 WAN) for link state, speed/duplex sync, and flow control.
+The module removes port 5 (eth6) from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory -- it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports (LAN and eth5 SFP+ trunk) for link state, speed/duplex sync, and flow control.
 
 The bitmap exclusion is necessary because the loop reads link speed from a PPE hardware register that always reports 1000M for SGMII+ links (the SGMII in-band protocol has no 2.5G speed code). If the loop managed our port, it would force the MAC to 1G on every link-up event, creating a MAC/SerDes speed mismatch that kills the data path.
 
