@@ -2,13 +2,12 @@
  * force_uniphy1_sgmiiplus.c - Force UCG-Fiber / UXG-Fiber uniphy1 (eth6) to SGMII+ 2.5G
  *
  * Bypasses the SSDK's SFP EEPROM validation by calling the uniphy mode set
- * function directly, then updates the SSDK bookkeeping state so the MAC sync
- * polling loop accepts SGMII+ as the correct mode for this port. The loop
- * continues running and managing link state for all ports (including eth5).
- *
- * Previous versions stopped the polling loop entirely, which caused sporadic
- * forwarding drops on eth5 — the loop handles link-state recovery, MAC
- * speed/duplex sync, and flow control for all ports on the switch.
+ * function directly, then updates SSDK bookkeeping so the MAC sync polling
+ * loop accepts SGMII+ as the correct mode. Port 5 (eth6) is excluded from
+ * the loop's port bitmap so it can't reconfigure our port's MAC speed (the
+ * loop reads 1000 from PPE due to SGMII in-band limitations and would force
+ * MAC to 1G, breaking the 2.5G data path). The loop continues managing all
+ * other ports (LAN + eth5 WAN) normally.
  *
  * Target: UCG-Fiber / UXG-Fiber, IPQ9574, kernel 5.4.213-ui-ipq9574
  * Module: qca-ssdk.ko must be loaded
@@ -23,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kallsyms.h>
+#include <linux/delay.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ozark Connect");
@@ -32,84 +32,79 @@ MODULE_DESCRIPTION("Force UCG-Fiber / UXG-Fiber uniphy1 to SGMII+ 2.5G");
 extern int ssdk_mac_sw_sync_work_stop(unsigned int dev_id);
 extern int ssdk_mac_sw_sync_work_start(unsigned int dev_id);
 
+/* Local symbols resolved via kallsyms */
 typedef int (*uniphy_mode_set_fn)(unsigned int dev_id, unsigned int uniphy_index, int mode);
 typedef int (*port_iface_mode_set_fn)(unsigned int dev_id, unsigned long port_id, int mode);
 typedef int (*dt_global_set_mac_mode_fn)(unsigned long dev_id, int uniphy_index, unsigned int mode);
+typedef unsigned int (*port_bmp_get_fn)(unsigned int dev_id);
+typedef void (*port_bmp_set_fn)(unsigned int dev_id, unsigned int bmp);
 
 static uniphy_mode_set_fn uniphy_mode_set;
 static port_iface_mode_set_fn port_iface_mode_set;
 static dt_global_set_mac_mode_fn dt_global_set_mac_mode;
+static port_bmp_get_fn port_bmp_get;
+static port_bmp_set_fn port_bmp_set;
 
 #define SSDK_UNIPHY_SGMIIPLUS 0x0c
 #define SSDK_UNIPHY_SGMII_CH0 0x0f
 #define UNIPHY_INDEX 1
 #define SSDK_PORT_ID 5
 #define DEV_ID 0
-
-/* SGMII+ port interface mode (hsl_uniphy_mode_to_port_mode maps 0x0c -> 6) */
 #define PORT_MODE_SGMIIPLUS 6
-
-/* Original state — restored on unload */
 #define ORIG_PORT_IFACE_MODE 0x0e
 #define ORIG_MAC_MODE 0x14
+
+static unsigned int orig_port_bmp;
 
 static int __init force_sgmiiplus_init(void)
 {
 	int ret;
+	unsigned int bmp;
 
 	uniphy_mode_set = (uniphy_mode_set_fn)kallsyms_lookup_name(
 		"adpt_hppe_uniphy_mode_set");
-	if (!uniphy_mode_set) {
-		pr_err("force_sgmiiplus: lookup failed: adpt_hppe_uniphy_mode_set\n");
-		return -ENOENT;
-	}
-
 	port_iface_mode_set = (port_iface_mode_set_fn)kallsyms_lookup_name(
 		"_adpt_hppe_port_interface_mode_set");
-	if (!port_iface_mode_set) {
-		pr_err("force_sgmiiplus: lookup failed: _adpt_hppe_port_interface_mode_set\n");
-		return -ENOENT;
-	}
-
 	dt_global_set_mac_mode = (dt_global_set_mac_mode_fn)kallsyms_lookup_name(
 		"ssdk_dt_global_set_mac_mode");
-	if (!dt_global_set_mac_mode) {
-		pr_err("force_sgmiiplus: lookup failed: ssdk_dt_global_set_mac_mode\n");
+	port_bmp_get = (port_bmp_get_fn)kallsyms_lookup_name(
+		"qca_ssdk_port_bmp_get");
+	port_bmp_set = (port_bmp_set_fn)kallsyms_lookup_name(
+		"qca_ssdk_port_bmp_set");
+
+	if (!uniphy_mode_set || !port_iface_mode_set || !dt_global_set_mac_mode ||
+	    !port_bmp_get || !port_bmp_set) {
+		pr_err("force_sgmiiplus: kallsyms lookup failed\n");
 		return -ENOENT;
 	}
 
-	pr_info("force_sgmiiplus: resolved all symbols via kallsyms\n");
+	pr_info("force_sgmiiplus: resolved all symbols\n");
 
-	/* Stop loop briefly during the mode change to prevent races */
-	ret = ssdk_mac_sw_sync_work_stop(DEV_ID);
-	if (ret < 0 && ret != -0x13) {
-		pr_err("force_sgmiiplus: ssdk_mac_sw_sync_work_stop failed: %d\n", ret);
-		return ret;
-	}
+	orig_port_bmp = port_bmp_get(DEV_ID);
+	bmp = orig_port_bmp & ~(1u << SSDK_PORT_ID);
 
-	/* Set uniphy1 hardware to SGMII+ — link flaps ~300ms */
+	ssdk_mac_sw_sync_work_stop(DEV_ID);
+
+	port_bmp_set(DEV_ID, bmp);
+	pr_info("force_sgmiiplus: port bitmap 0x%x -> 0x%x (port %d excluded)\n",
+		orig_port_bmp, bmp, SSDK_PORT_ID);
+
 	ret = uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
 	if (ret != 0) {
 		pr_err("force_sgmiiplus: uniphy_mode_set failed: %d\n", ret);
+		port_bmp_set(DEV_ID, orig_port_bmp);
 		ssdk_mac_sw_sync_work_start(DEV_ID);
 		return ret;
 	}
 	pr_info("force_sgmiiplus: uniphy%d set to SGMII+ 2.5G\n", UNIPHY_INDEX);
 
-	/* Update SSDK bookkeeping so the polling loop sees SGMII+ as correct */
 	port_iface_mode_set(DEV_ID, SSDK_PORT_ID, PORT_MODE_SGMIIPLUS);
-	pr_info("force_sgmiiplus: port %d interface_mode set to 0x%x\n",
-		SSDK_PORT_ID, PORT_MODE_SGMIIPLUS);
-
 	dt_global_set_mac_mode(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
-	pr_info("force_sgmiiplus: uniphy%d mac_mode set to 0x%x\n",
-		UNIPHY_INDEX, SSDK_UNIPHY_SGMIIPLUS);
 
-	/* Restart the polling loop — it now manages all ports including eth5 */
+	msleep(1000);
 	ssdk_mac_sw_sync_work_start(DEV_ID);
-	pr_info("force_sgmiiplus: MAC sync polling restarted\n");
+	pr_info("force_sgmiiplus: loop restarted (port %d excluded)\n", SSDK_PORT_ID);
 
-	pr_info("force_sgmiiplus: verify: cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate\n");
 	return 0;
 }
 
@@ -118,20 +113,20 @@ static void __exit force_sgmiiplus_exit(void)
 	if (!uniphy_mode_set)
 		return;
 
-	pr_info("force_sgmiiplus: reverting...\n");
-
 	ssdk_mac_sw_sync_work_stop(DEV_ID);
 
 	uniphy_mode_set(DEV_ID, UNIPHY_INDEX, SSDK_UNIPHY_SGMII_CH0);
 
 	if (port_iface_mode_set)
 		port_iface_mode_set(DEV_ID, SSDK_PORT_ID, ORIG_PORT_IFACE_MODE);
+	dt_global_set_mac_mode(DEV_ID, UNIPHY_INDEX, ORIG_MAC_MODE);
 
-	if (dt_global_set_mac_mode)
-		dt_global_set_mac_mode(DEV_ID, UNIPHY_INDEX, ORIG_MAC_MODE);
+	if (port_bmp_set)
+		port_bmp_set(DEV_ID, orig_port_bmp);
 
 	ssdk_mac_sw_sync_work_start(DEV_ID);
-	pr_info("force_sgmiiplus: reverted to SGMII 1G, polling restarted\n");
+	pr_info("force_sgmiiplus: reverted, loop restarted with full bitmap 0x%x\n",
+		orig_port_bmp);
 }
 
 module_init(force_sgmiiplus_init);

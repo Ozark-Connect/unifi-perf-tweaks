@@ -10,7 +10,7 @@
 
 To run optimally for OLT downstream bursts, GPON ONT SFP modules need to run at 2.5G on the UCG-Fiber / UXG-Fiber's 2nd SFP+ port (eth6 / Port 7), but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
 
-On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) every ~12 seconds that re-reads the SFP EEPROM and forces the port back to SGMII 1G. Even if you could set 2.5G through the normal path, the polling loop would revert it within seconds. The module solves this by updating the SSDK's internal bookkeeping state to reflect the SGMII+ mode, so the polling loop sees it as the correct state and leaves it alone.
+On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) that polls all switch ports every ~400ms. For any port it manages, the loop reads the link speed from a PPE hardware status register and reconfigures the MAC to match. Because SGMII+ has no 2.5G speed code in the SGMII in-band protocol, the PPE always reports 1000M for a 2.5G link. If the loop manages our port, it forces the MAC to 1G -- breaking the 2.5G data path. The module excludes our port from the loop's port bitmap so the loop manages all other ports (LAN, eth5 WAN) but never touches ours.
 
 ### Why a kernel module
 
@@ -18,11 +18,12 @@ The SGMII+ mode set requires kernel-level operations that can't be done from use
 
 ## What the module does
 
-1. Stops the MAC sync polling loop briefly by calling `ssdk_mac_sw_sync_work_stop()` to prevent races during the mode change
-2. Sets uniphy1 to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, 1, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
-3. Updates SSDK bookkeeping so the polling loop sees SGMII+ as the correct mode: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set(0, 5, 6)` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode(0, 1, 0x0c)`
-4. Restarts the MAC sync polling loop via `ssdk_mac_sw_sync_work_start()` -- the loop now manages all ports normally, including eth5
-5. On unload (`rmmod`), reverts all state (uniphy mode, port interface mode, mac_mode) to the original SGMII values and restarts the polling loop
+1. Saves the current port bitmap via `qca_ssdk_port_bmp_get()`, then stops the MAC sync polling loop briefly to prevent races during the mode change
+2. Excludes port 5 (eth6) from the polling loop's port bitmap via `qca_ssdk_port_bmp_set()` -- the loop will skip our port entirely, preventing it from forcing the MAC to 1G
+3. Sets uniphy1 to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, 1, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
+4. Updates SSDK bookkeeping: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set(0, 5, 6)` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode(0, 1, 0x0c)`
+5. Waits 1 second for the link to stabilize after the mode change, then restarts the polling loop -- the loop now manages all other ports (LAN, eth5 WAN) but skips port 5
+6. On unload (`rmmod`), reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap) to the original values and restarts the polling loop with the full port set
 
 The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
@@ -32,11 +33,19 @@ The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
 This module targets uniphy1 = eth6 = Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0).
 
-### SSDK internal state modification
+### Port bitmap exclusion
 
-The module writes to two SSDK internal data structures (per-port interface mode and per-uniphy mac_mode) to make the polling loop accept SGMII+ as the correct state. These are the same structures the SSDK itself writes during normal port initialization -- the module just sets them to values the SSDK would never choose on its own because of the EEPROM validation gate.
+The module removes port 5 (eth6) from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory -- it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports (LAN and eth5 WAN) for link state, speed/duplex sync, and flow control.
 
-v1 of this module stopped the MAC sync polling loop entirely instead of updating the bookkeeping. This caused sporadic forwarding drops on eth5 (the other SFP+ port) and loss of flow control during UniFi Network config pushes, because the polling loop manages link state, speed/duplex sync, and flow control for all ports -- not just eth6. If you are running v1 (identifiable by `polling_stopped` in the source or "MAC sync polling stopped" in dmesg without a subsequent "MAC sync polling restarted"), upgrade to v2.
+The bitmap exclusion is necessary because the loop reads link speed from a PPE hardware register that always reports 1000M for SGMII+ links (the SGMII in-band protocol has no 2.5G speed code). If the loop managed our port, it would force the MAC to 1G on every link-up event, creating a MAC/SerDes speed mismatch that kills the data path.
+
+### SSDK bookkeeping
+
+The module also writes to two SSDK internal data structures (per-port interface mode and per-uniphy mac_mode). These are the same structures the SSDK itself writes during normal port initialization -- the module sets them to SGMII+ values so any SSDK code path that checks the port mode sees a consistent state.
+
+### Version history
+
+v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 (current) excludes port 5 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. If you are running v1 or v2, upgrade.
 
 ### Symbol resolution
 
@@ -46,7 +55,9 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 |---|---|---|---|
 | `adpt_hppe_uniphy_mode_set` | local (t) | kallsyms | Uniphy SerDes mode set |
 | `_adpt_hppe_port_interface_mode_set` | local (t) | kallsyms | Per-port interface mode bookkeeping |
-| `ssdk_dt_global_set_mac_mode` | exported (T) | extern | Per-uniphy global mac_mode bookkeeping |
+| `ssdk_dt_global_set_mac_mode` | local (t) | kallsyms | Per-uniphy global mac_mode bookkeeping |
+| `qca_ssdk_port_bmp_get` | local (t) | kallsyms | Read polling loop port bitmap |
+| `qca_ssdk_port_bmp_set` | local (t) | kallsyms | Write polling loop port bitmap |
 
 | UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
 |---|---|---|
@@ -54,7 +65,7 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | 5.0.16 | 5.4.213-ui-ipq9574 | `ffffffc00893e300` |
 | 5.1.7 EA | 5.4.213-ui-ipq9574 | `ffffffc00894e200` |
 
-The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`, `ssdk_dt_global_set_mac_mode`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
+The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
 After loading, confirm the symbols resolved:
 
@@ -88,8 +99,8 @@ cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 # Expected: 125000000 (or similar)
 
 # 5. Check the kallsyms addresses for your OS version
-grep -E 'adpt_hppe_uniphy_mode_set|_adpt_hppe_port_interface_mode_set|ssdk_dt_global_set_mac_mode' /proc/kallsyms
-# All three symbols should appear. The module resolves them at runtime,
+grep -E 'adpt_hppe_uniphy_mode_set|_adpt_hppe_port_interface_mode_set|ssdk_dt_global_set_mac_mode|qca_ssdk_port_bmp' /proc/kallsyms
+# All five symbols should appear. The module resolves them at runtime,
 # so it should work on any OS version where they exist.
 # Check dmesg after loading to confirm all resolved successfully.
 ```
