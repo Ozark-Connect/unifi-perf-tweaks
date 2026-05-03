@@ -32,11 +32,11 @@ The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
 ### This is for the 2nd SFP+ port only
 
-This module targets uniphy1 = eth6 = Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0).
+This module targets uniphy1 = eth6 = physical Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0).
 
 ### Port bitmap exclusion
 
-The module removes port 5 (eth6) from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory -- it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports (LAN and eth5 SFP+ trunk) for link state, speed/duplex sync, and flow control.
+The module removes "port 5" (eth6, physically labeled Port 7) from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory -- it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports (LAN and eth5 SFP+ trunk) for link state, speed/duplex sync, and flow control.
 
 The bitmap exclusion is necessary because the loop reads link speed from a PPE hardware register that always reports 1000M for SGMII+ links (the SGMII in-band protocol has no 2.5G speed code). If the loop managed our port, it would force the MAC to 1G on every link-up event, creating a MAC/SerDes speed mismatch that kills the data path.
 
@@ -46,7 +46,7 @@ The module also writes to two SSDK internal data structures (per-port interface 
 
 ### Version history
 
-v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 (current) adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. If you are running v1, v2, or v3, upgrade.
+v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5/eth6 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 (current) adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. If you are running v1, v2, or v3, upgrade.
 
 ### Symbol resolution
 
