@@ -1,6 +1,6 @@
 # unifi-perf-tweaks
 
-Performance tuning scripts for UniFi Cloud Gateways (UCG). These address real, measured performance issues - eMMC write pressure causing packet loss, JVM garbage collection stalls, and overly conservative thermal management.
+Performance tuning scripts for UniFi Cloud Gateways (UCG) and UniFi Gateways (UXG). These address real, measured performance issues - eMMC write pressure causing packet loss, JVM garbage collection stalls, and overly conservative thermal management. Also includes a module for SFP 2.5G SGMII+ support on the UCG-Fiber and UXG-Fiber models which only have native 1/10 gig support.
 
 ---
 
