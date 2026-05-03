@@ -23,7 +23,8 @@ The SGMII+ mode set requires kernel-level operations that can't be done from use
 3. Sets uniphy1 to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, 1, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
 4. Updates SSDK bookkeeping: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set(0, 5, 6)` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode(0, 1, 0x0c)`
 5. Waits 1 second for the link to stabilize after the mode change, then restarts the polling loop -- the loop now manages all other ports (LAN, eth5 SFP+ trunk) but skips port 5
-6. On unload (`rmmod`), reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap) to the original values and restarts the polling loop with the full port set
+6. Writes 2500 to the SSDK SFP PHY speed cache (`ssdk_phy_priv_data` at offset 0x690), fires `ssdk_port_link_notify` and `ubnt_send_phy_event`, then triggers an async `RTM_NEWLINK` (transient interface alias set/clear) so `ubios-udapi-server` re-reads ethtool. This makes ethtool, sysfs, UDAPI, and UniFi Network all report 2.5G
+7. On unload (`rmmod`), restores the speed cache to its original value and reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap), then restarts the polling loop with the full port set
 
 The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
@@ -45,7 +46,7 @@ The module also writes to two SSDK internal data structures (per-port interface 
 
 ### Version history
 
-v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 (current) excludes port 5 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. If you are running v1 or v2, upgrade.
+v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 (current) adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. If you are running v1, v2, or v3, upgrade.
 
 ### Symbol resolution
 
@@ -58,6 +59,9 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | `ssdk_dt_global_set_mac_mode` | local (t) | kallsyms | Per-uniphy global mac_mode bookkeeping |
 | `qca_ssdk_port_bmp_get` | local (t) | kallsyms | Read polling loop port bitmap |
 | `qca_ssdk_port_bmp_set` | local (t) | kallsyms | Write polling loop port bitmap |
+| `ssdk_phy_priv_data_get` | local (t) | kallsyms | SSDK private data (SFP PHY speed cache) |
+| `ssdk_port_link_notify` | local (t) | kallsyms | Link state notifier chain |
+| `ubnt_send_phy_event` | local (t) | kallsyms | UniFi PHY event netlink notification |
 
 | UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
 |---|---|---|
@@ -148,17 +152,23 @@ ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
 # 312500000 = 2.5G, 125000000 = 1G
 ```
 
-### What about ethtool / UniFi Network?
+### ethtool / UniFi Network speed reporting
 
-`ethtool eth6` will still show `Speed: 1000Mb/s` and the UniFi Network UI will still report a 1G link. This is a cosmetic limitation of the SGMII in-band protocol, not a bug. SGMII's in-band control word has no speed code for 2.5G -- it only defines codes for 10M, 100M, and 1000M. SGMII+ achieves 2.5G by running the same protocol at 3.125 GBaud (vs 1.25 GBaud for SGMII), but the in-band control word still says 1000M. The PPE hardware reads this control word faithfully and reports 1000M to software. The actual data rate is 2.5G, confirmed by the uniphy clock rate and SFP-side diagnostics.
+The module updates ethtool, sysfs (`/sys/class/net/eth6/speed`), UDAPI, and the UniFi Network dashboard to report 2.5G. This works around a cosmetic limitation of SGMII in-band signaling -- the protocol has no speed code for 2.5G, so the PPE hardware always reports 1000M for SGMII+ links.
 
-The uniphy clock rate and SerDes register are the reliable ways to confirm the actual speed. There's a diagnostic script that checks both SFP+ ports at once:
+The fix writes to the SSDK's internal SFP PHY speed cache (the same cache that the "QCA SFP" fake PHY driver's `sfp_read_status()` copies into `phydev->speed`). The kernel's PHY state machine picks up the cached value within ~2 seconds, then a transient `RTM_NEWLINK` event (interface alias set/clear) signals `ubios-udapi-server` to re-read via ethtool.
+
+After loading, all speed reporting paths should show 2500:
 
 ```bash
-ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/sfp-link-check.sh
+ethtool eth6 | grep Speed
+# Speed: 2500Mb/s
+
+cat /sys/class/net/eth6/speed
+# 2500
 ```
 
-Or manually:
+The uniphy clock rate and SerDes register remain the most reliable ways to confirm the actual hardware speed:
 
 ```bash
 cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate

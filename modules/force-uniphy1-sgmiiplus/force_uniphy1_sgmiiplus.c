@@ -17,12 +17,20 @@
  * UNLOAD:  rmmod force_uniphy1_sgmiiplus  (reverts to SGMII 1G)
  * VERIFY:  cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
  *          (should show 312500000 after load, 125000000 after unload)
+ *
+ * Also writes 2500 to the SSDK SFP PHY speed cache so that ethtool,
+ * sysfs, and UniFi Network all report 2.5G. The "QCA SFP" fake PHY
+ * driver's sfp_read_status() copies speed from this cache into
+ * phydev->speed. After writing, fires ssdk_port_link_notify and
+ * ubnt_send_phy_event, then triggers an RTM_NEWLINK via a transient
+ * interface alias so UDAPI re-reads ethtool.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kallsyms.h>
 #include <linux/delay.h>
+#include <linux/kmod.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ozark Connect");
@@ -38,6 +46,10 @@ typedef int (*port_iface_mode_set_fn)(unsigned int dev_id, unsigned long port_id
 typedef int (*dt_global_set_mac_mode_fn)(unsigned long dev_id, int uniphy_index, unsigned int mode);
 typedef unsigned int (*port_bmp_get_fn)(unsigned int dev_id);
 typedef void (*port_bmp_set_fn)(unsigned int dev_id, unsigned int bmp);
+typedef unsigned long (*priv_data_get_fn)(unsigned int dev_id);
+typedef void (*phy_event_fn)(unsigned char port);
+typedef void (*link_notify_fn)(unsigned char port, unsigned char link,
+			       unsigned char speed, unsigned char duplex);
 
 static uniphy_mode_set_fn uniphy_mode_set;
 static port_iface_mode_set_fn port_iface_mode_set;
@@ -54,7 +66,18 @@ static port_bmp_set_fn port_bmp_set;
 #define ORIG_PORT_IFACE_MODE 0x0e
 #define ORIG_MAC_MODE 0x14
 
+#define SPEED_2500   2500
+#define DUPLEX_FULL  1
+#define LINK_NOTIFY_SPEED_2500 3
+
+#define SPEED_CACHE_BASE  0x690
+#define DUPLEX_CACHE_BASE 0x6d0
+#define PORT_STRIDE       4
+
 static unsigned int orig_port_bmp;
+static unsigned long priv_addr;
+static unsigned int orig_speed;
+static unsigned int orig_duplex;
 
 static int __init force_sgmiiplus_init(void)
 {
@@ -105,6 +128,59 @@ static int __init force_sgmiiplus_init(void)
 	ssdk_mac_sw_sync_work_start(DEV_ID);
 	pr_info("force_sgmiiplus: loop restarted (port %d excluded)\n", SSDK_PORT_ID);
 
+	/* Update SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI report 2500 */
+	{
+		priv_data_get_fn get_priv;
+		phy_event_fn send_phy_event;
+		link_notify_fn notify;
+		unsigned int *sp, *dp;
+
+		get_priv = (priv_data_get_fn)
+			kallsyms_lookup_name("ssdk_phy_priv_data_get");
+		if (get_priv)
+			priv_addr = get_priv(DEV_ID);
+
+		if (priv_addr) {
+			sp = (unsigned int *)(priv_addr + SPEED_CACHE_BASE +
+					     (SSDK_PORT_ID - 1) * PORT_STRIDE);
+			dp = (unsigned int *)(priv_addr + DUPLEX_CACHE_BASE +
+					     (SSDK_PORT_ID - 1) * PORT_STRIDE);
+			orig_speed = *sp;
+			orig_duplex = *dp;
+			*sp = SPEED_2500;
+			*dp = DUPLEX_FULL;
+			pr_info("force_sgmiiplus: speed cache %u -> %u\n",
+				orig_speed, SPEED_2500);
+		}
+
+		notify = (link_notify_fn)
+			kallsyms_lookup_name("ssdk_port_link_notify");
+		if (notify)
+			notify(SSDK_PORT_ID, 1, LINK_NOTIFY_SPEED_2500, 1);
+
+		send_phy_event = (phy_event_fn)
+			kallsyms_lookup_name("ubnt_send_phy_event");
+		if (send_phy_event)
+			send_phy_event(SSDK_PORT_ID);
+
+		/* Trigger RTM_NEWLINK so UDAPI re-reads ethtool.
+		 * Delayed 2s for PHY state machine to copy cache into
+		 * phydev->speed. UMH_NO_WAIT so module init returns
+		 * immediately — doesn't block the dsmp event loop. */
+		{
+			static char *argv[] = {
+				"/bin/sh", "-c",
+				"sleep 2 && ip link set eth6 alias x && ip link set eth6 alias ''",
+				NULL
+			};
+			static char *envp[] = { "PATH=/sbin:/bin", NULL };
+
+			call_usermodehelper(argv[0], argv, envp,
+					   UMH_NO_WAIT);
+		}
+		pr_info("force_sgmiiplus: speed reporting updated\n");
+	}
+
 	return 0;
 }
 
@@ -112,6 +188,16 @@ static void __exit force_sgmiiplus_exit(void)
 {
 	if (!uniphy_mode_set)
 		return;
+
+	if (priv_addr) {
+		unsigned int *sp = (unsigned int *)(priv_addr + SPEED_CACHE_BASE +
+						   (SSDK_PORT_ID - 1) * PORT_STRIDE);
+		unsigned int *dp = (unsigned int *)(priv_addr + DUPLEX_CACHE_BASE +
+						   (SSDK_PORT_ID - 1) * PORT_STRIDE);
+		*sp = orig_speed;
+		*dp = orig_duplex;
+		pr_info("force_sgmiiplus: speed cache restored to %u\n", orig_speed);
+	}
 
 	ssdk_mac_sw_sync_work_stop(DEV_ID);
 
