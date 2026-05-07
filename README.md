@@ -92,6 +92,8 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
 
+> **eth5 / Port 6:** The module currently targets eth6 only. Adding eth5 support is straightforward (same SSDK calls, different uniphy index) but untested. If you have a lab gateway and need 2.5G on eth5, open an issue.
+
 ### Boot Order
 
 Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sensible default order. You can renumber to fit your existing boot scripts, but **respect the dependency chain:**
@@ -226,7 +228,7 @@ SFP+ port status check - reads the uniphy SerDes registers and clock rates for b
 ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/sfp-link-check.sh
 ```
 
-Reports the actual physical-layer speed regardless of what `ethtool` or the UniFi UI show. Useful for confirming the SGMII+ module is working (see [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) for why `ethtool` always reports 1G with this module).
+Reports the actual physical-layer speed by reading uniphy SerDes registers directly. Useful for confirming the SGMII+ module is working. With module v4+, `ethtool` and the UniFi UI also report 2500 Mbps correctly.
 
 ## Reverting
 

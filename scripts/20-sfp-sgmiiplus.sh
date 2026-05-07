@@ -5,14 +5,12 @@
 # by calling the QCA-SSDK's internal uniphy mode set function directly,
 # bypassing SFP EEPROM validation that blocks the speed change.
 #
-# This also stops the SSDK's MAC sync polling loop, which re-reads the SFP
-# EEPROM every ~12s and forces SGMII mode. Without stopping it, the polling
-# loop reverts the 2.5G change within seconds.
+# WARNING: This targets eth6 / Port 7 (the 2nd SFP+ port) ONLY.
 #
-# WARNING: This targets eth6 / Port 7 (the 2nd SFP+ port) ONLY. Stopping
-# the MAC sync polling loop is global — it may affect the OTHER SFP+ port's
-# ability to recover from link drops, hot swaps, or module changes. We have
-# not tested those scenarios.
+# The SSDK's MAC sync polling loop re-reads the SFP EEPROM every ~12s and
+# would revert the 2.5G change. The module (v3+) excludes eth6 from the
+# polling loop's port bitmap and restarts it — the loop continues to run
+# for all other ports, so eth5 link recovery is unaffected.
 #
 # Target: UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
 # Requires: qca-ssdk.ko loaded, module pre-deployed to /data/sfp-sgmiiplus/
