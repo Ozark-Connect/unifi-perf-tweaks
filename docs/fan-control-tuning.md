@@ -110,10 +110,34 @@ cat /var/log/fan-control-tuning.log
 
 ## Reverting
 
-Simply restart `uhwd` - it resets `config.fan` to defaults:
+Remove the boot script and reboot - uhwd re-initializes `config.fan` to stock defaults during a full boot:
 
 ```bash
+rm /data/on_boot.d/15-fan-control-tuning.sh
+reboot
+```
+
+**Note:** `systemctl restart uhwd` alone does **not** clear tuned values from the SDB. The SDB retains PID setpoints across uhwd restarts. To revert without rebooting, write stock defaults back to the SDB explicitly:
+
+```bash
+python3 << 'EOF'
+import threading, time
+from ustd.statusdb.sdb_client import SDBClient
+c = SDBClient()
+t = threading.Thread(target=c.run, daemon=True)
+t.start()
+time.sleep(1)
+fan = c.get("config.fan")
+pid = fan.get("PID", {})
+stock = {"cpu": 100, "hdd": 68, "rtl8372": 109, "rtl8261": 103}
+for k, v in stock.items():
+    if k in pid:
+        pid[k][0] = v
+fan["standby"] = 20
+c.update("config.fan", fan)
+time.sleep(1)
+EOF
 systemctl restart uhwd
 ```
 
-Or remove the script from `/data/on_boot.d/` and reboot.
+*Updated May 2026: previous versions stated `systemctl restart uhwd` was sufficient to revert. Testing on firmware 5.0.16 confirmed the SDB retains tuned values across uhwd restarts. A full reboot or explicit SDB reset is required.*
