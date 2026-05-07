@@ -33,7 +33,7 @@ The mode set causes eth6 to flap briefly (~300ms) while the PLL relocks.
 
 ### This is for the 2nd SFP+ port only
 
-This module targets uniphy1 = eth6 = physical Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (uniphy0). Support for eth5 (uniphy0 / Port 6) is architecturally identical - the same SSDK calls with `uniphy_index=0` and `ssdk_port_t=4` - but hasn't been tested. If you have a lab gateway and an SFP that needs 2.5G on eth5, open an issue and we can add it.
+This module targets uniphy1 = eth6 = physical Port 7, the 2nd SFP+ port on the UCG-Fiber / UXG-Fiber. It does not touch the 1st SFP+ port (eth5 / uniphy2). Support for eth5 (uniphy2 / SSDK port 6) is architecturally identical - the same SSDK calls with `uniphy_index=2` and `ssdk_port_t=6` - but hasn't been tested. If you have a lab gateway and an SFP that needs 2.5G on eth5, open an issue and we can add it.
 
 ### Port bitmap exclusion
 
