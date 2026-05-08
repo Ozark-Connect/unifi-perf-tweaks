@@ -65,12 +65,15 @@ check_port() {
     fi
 }
 
-# Check if SGMII+ module is loaded
-MODULE_STATUS="not loaded"
-lsmod 2>/dev/null | grep -q force_uniphy1_sgmiiplus && MODULE_STATUS="loaded"
+# Check if SGMII+ modules are loaded
+U1_STATUS="not loaded"
+U2_STATUS="not loaded"
+lsmod 2>/dev/null | grep -q force_uniphy1_sgmiiplus && U1_STATUS="loaded"
+lsmod 2>/dev/null | grep -q force_uniphy2_sgmiiplus && U2_STATUS="loaded"
 
 echo "=== SFP+ Port Status ==="
-echo "  SGMII+ module: $MODULE_STATUS"
+echo "  SGMII+ module (uniphy1/eth6): $U1_STATUS"
+echo "  SGMII+ module (uniphy2/eth5): $U2_STATUS"
 echo ""
 echo "--- uniphy2 (eth5 / SFP+ Port 6) ---"
 check_port 2 eth5 "Port 6"
