@@ -1,0 +1,5 @@
+# Force LF line endings for all text files — these deploy to Linux gateways
+* text=auto eol=lf
+
+# Binary files
+*.ko binary
