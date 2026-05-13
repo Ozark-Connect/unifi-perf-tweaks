@@ -240,8 +240,6 @@ Every script is designed to be safely reversible:
 
 ## Contributing
 
-This repo is in private beta. If you're testing:
-
 1. **Start with one script** - don't deploy everything at once
 2. **Monitor for 24+ hours** before adding another script
 3. **Report back** with your gateway model, UniFi OS version, UniFi Network version, and results
@@ -250,6 +248,7 @@ This repo is in private beta. If you're testing:
 ## Acknowledgments
 
 - [@mark0263](https://github.com/mark0263) - confirmed the UDM-SE storage layout (`/dev/sda5` → `/ssd1`, MongoDB at `/ssd1/.data/unifi/data/db`), which is the basis for the UDM-SE entry in the model compatibility table, and tested the scripts across multiple UniFi OS versions on a UCG-Fiber lab unit, surfacing the boot-time `activating`-state bug in `stop_mongod_and_unifi()` among others.
+- [@digaus](https://github.com/digaus) - hands-on testing of the Zyxel PMG3000-D20B, confirming firmware reverse-engineering findings on the module, and verifying that the firmware upgrade to the V2.50 lineage fixed the remaining SFP PHY issues.
 
 ## License
 
