@@ -1,6 +1,6 @@
 # unifi-perf-tweaks
 
-Performance tuning scripts for UniFi Cloud Gateways (UCG) and UniFi Gateways (UXG). These address real, measured performance issues - eMMC write pressure causing packet loss, JVM garbage collection stalls, and overly conservative thermal management. Also includes a module for SFP 2.5G SGMII+ (HSGMII) support on the UCG-Fiber and UXG-Fiber models which only have native 1/10 gig support.
+Performance tuning scripts for UniFi Cloud Gateways (UCG) and UniFi Gateways (UXG). These address real, measured performance issues - eMMC write pressure causing packet loss and overly conservative thermal management. Also includes modules for SFP 2.5G SGMII+ (HSGMII) support on both SFP+ ports (eth5/Port 6 and eth6/Port 7) of the UCG-Fiber and UXG-Fiber, which only have native 1/10 gig support. Several of these tweaks are available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer).
 
 ---
 
@@ -10,11 +10,11 @@ These scripts weren't thrown together overnight. They're the result of hundreds 
 
 The performance investigation alone spans months of work: multi-gateway performance comparisons, an OS 5.0 memory and CPU deep dive, a full UniFi Network flow control test suite, and a 3-day packet loss investigation that produced over 1,600 lines of documented findings across multiple research documents. The eMMC write pressure root cause was identified through `fatrace`, `iostat`, and MongoDB slow query profiling, with bulk delete operations correlated to cyclical packet loss windows down to the second.
 
-The JVM work went through 5+ distinct heap configurations, each profiled for hours (some to 23-25 hours) before discovering that Ubiquiti's `-XX:MaxHeapFree` flag, while a real SubstrateVM flag, is an upper-bound cap on retained free space rather than a floor - meaning it can only limit how much free heap the GC keeps around, never prevent shrinking. This invalidates every community tuning guide that raises `MaxHeapFree` to "give the heap more room." JVM heap tuning and long-term soak testing is still ongoing as of this writing. The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
+The JVM work went through 5+ distinct heap configurations, each profiled for hours (some to 23-25 hours) before discovering that Ubiquiti's `-XX:MaxHeapFree` flag, while a real SubstrateVM flag, is an upper-bound cap on retained free space rather than a floor - meaning it can only limit how much free heap the GC keeps around, never prevent shrinking. This invalidates every community tuning guide that raises `MaxHeapFree` to "give the heap more room." After extended testing, JVM heap parameter tweaks showed minimal measurable impact on GC pause behavior - the stock GraalVM Serial GC configuration is already reasonably tuned, and the real wins came from eliminating eMMC write pressure instead. The JVM tuning script is still included for reference but is no longer a recommended deployment. The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
 
 Every script here has been running on a production gateway serving real users. This is not theoretical.
 
-Once we've collected enough testing data across different models and configurations, these performance enhancements will be integrated into [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer) as automated, one-click deployments.
+Several of these tweaks are already available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer), which handles deployment, version tracking, and updates automatically. The scripts here are the upstream source — use them directly if you prefer manual control, or use Network Optimizer if you want a managed experience.
 
 ---
 
@@ -75,7 +75,7 @@ UniFi Cloud Gateways (particularly models with CPU-attached network ports like t
 
 1. **eMMC write pressure** - MongoDB, journald, and syslog all write to eMMC flash by default. The eMMC flash controller's garbage collection stalls I/O and freezes `ubios-udapi-server`, dropping packets for 30+ minute windows.
 
-2. **JVM garbage collection** - The UniFi controller's stock heap configuration causes Full GC pauses (150-350ms) every 30-70 seconds. Each pause can drop packets on CPU-attached ports. *(JVM tuning is still under active testing - see note below)*
+2. **JVM garbage collection** - The UniFi controller's GraalVM Serial GC produces Full GC pauses (150-350ms) every 30-70 seconds. After extensive profiling, JVM heap parameter tuning showed minimal impact on this behavior - the real fix turned out to be eliminating eMMC write pressure (item 1 above), which was the actual bottleneck causing packet loss during GC windows.
 
 3. **Conservative thermal management** - The fan controller defaults to absurdly high setpoints (CPU at 100C), keeping components hotter than necessary.
 
@@ -85,14 +85,15 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 | Script | Boot Order | What It Does | Models | Status |
 |---|---|---|---|---|
-| [`05-jvm-heap-tuning.sh`](scripts/05-jvm-heap-tuning.sh) | 05 | Lock JVM heap to prevent GC thrashing | All UCG | **Testing** |
+| [`05-jvm-heap-tuning.sh`](scripts/05-jvm-heap-tuning.sh) | 05 | Lock JVM heap to prevent GC thrashing | All UCG | **Low impact** |
 | [`06-mongodb-ssd-offload.sh`](scripts/06-mongodb-ssd-offload.sh) | 06 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD | Stable |
 | [`07-mongodb-ssd-backup.sh`](scripts/07-mongodb-ssd-backup.sh) | 07 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
+| [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
 | [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
 
-> **eth5 / Port 6:** The module currently targets eth6 only. Adding eth5 support is straightforward (same SSDK calls, different uniphy index) but untested. If you have a lab gateway and need 2.5G on eth5, open an issue.
+> **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
 
 ### Boot Order
 
@@ -101,7 +102,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 - **`05` must come before `06`** - JVM heap tuning edits `/etc/default/unifi`, and `06` is what triggers the unifi restart that picks up the new config. If `06` runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
 - **`07` must come after `06`** - the backup script depends on the SSD offload being set up.
 - `05`/`06`/`07` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against a stable, bind-mounted, already-restarted environment.
-- `10`, `15`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
+- `10`, `15`, `19`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
 - **If you add your own boot scripts** that touch mongo or unifi (mongodump, API calls, etc.), number them >= `10` so they run after `06` has finished the bind mount and service restart.
 
 ### Model Compatibility
