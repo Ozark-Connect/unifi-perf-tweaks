@@ -255,6 +255,7 @@ Every script is designed to be safely reversible:
 
 - [@mark0263](https://github.com/mark0263) - confirmed the UDM-SE storage layout (`/dev/sda5` → `/ssd1`, MongoDB at `/ssd1/.data/unifi/data/db`), which is the basis for the UDM-SE entry in the model compatibility table, and tested the scripts across multiple UniFi OS versions on a UCG-Fiber lab unit, surfacing the boot-time `activating`-state bug in `stop_mongod_and_unifi()` among others.
 - [@digaus](https://github.com/digaus) - hands-on testing of the Zyxel PMG3000-D20B, confirming firmware reverse-engineering findings on the module, and verifying that the firmware upgrade to the V2.50 lineage fixed the remaining SFP PHY issues.
+- [@coreclk](https://github.com/coreclk) - identified that the MongoDB SSD staleness check was comparing the static `WiredTiger` version header (whose timestamp never changes) instead of `WiredTiger.turtle` (updated on checkpoints/shutdowns), which caused data loss and crash loops when re-enabling the tweak after running on eMMC.
 
 ## License
 
