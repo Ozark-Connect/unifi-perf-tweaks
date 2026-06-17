@@ -2,7 +2,7 @@
 
 Verified 2026-06-17 on a test UCG-Fiber running UniFi OS 5.1.19.
 
-**Scope:** This round verified the **SGMII+ kernel module** against the upgraded firmware. The boot scripts (05/06/07/10/15) were not re-checked live this round; they are expected compatible (kernel and userland unchanged from 5.1.15) but carry the 5.1.15 sign-off, not a fresh 5.1.19 one.
+**Scope:** This round verified the **SGMII+ kernel module** directly against the upgraded firmware (static + live). The boot scripts (05/06/07/10/15) are exercised on 5.1.19 via the [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer) deployment, which ships these scripts (or a superset) — kernel and userland are unchanged from 5.1.15.
 
 ## Kernel & vermagic
 
