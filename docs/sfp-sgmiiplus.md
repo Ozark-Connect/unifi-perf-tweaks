@@ -78,6 +78,7 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | 5.0.10 | 5.4.213-ui-ipq9574 | `ffffffc008935300` |
 | 5.0.16 | 5.4.213-ui-ipq9574 | `ffffffc00893e300` |
 | 5.1.7 EA | 5.4.213-ui-ipq9574 | `ffffffc00894e200` |
+| 5.1.19 | 5.4.213-ui-ipq9574 | `ffffffc00894f200` |
 
 The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
