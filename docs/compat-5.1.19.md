@@ -45,6 +45,8 @@ Verified specifically against the symbols/offsets the SGMII+ module depends on:
 
 Test-loaded `force_uniphy1_sgmiiplus.ko` (vermagic `5.4.213-ui-ipq9574`, matches) on the empty/down eth6 port. NetworkOptimizer gates module load on link presence, so it would skip an empty port — a manual `insmod` is the correct way to exercise the module here. The register writes execute independent of SFP presence, so an empty port is a valid load/unload test.
 
+**Timestamps (`dmesg -T`, UTC):** module loaded `2026-06-17 18:23:55Z`, unloaded `2026-06-17 18:24:27Z` (~32 s loaded). The gateway kernel had continuous uptime since `2026-06-17 18:10:08Z` spanning the entire test — the load/unload did not reboot or down the gateway.
+
 Load (`insmod rc=0`):
 
 ```
