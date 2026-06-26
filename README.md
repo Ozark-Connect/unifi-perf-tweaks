@@ -58,6 +58,7 @@ The MongoDB SSD scripts (`06-mongodb-ssd-offload.sh` and `07-mongodb-ssd-backup.
 - **UniFi OS 5.1.7 EA** / UniFi Network 10.3.47 - OS upgrade from 5.0.16 verified (the SSD mount path auto-migrated from `/volume1` to `/volume/<uuid>/` and the bind mount re-established on boot without intervention), followed by a Network app upgrade to 10.3.47 with no issues.
 - **UniFi OS 5.1.11 EA** - user-tested, no issues. The scripts are generally Network app version independent; the SSD mount path change was an OS-level change in 5.1.x.
 - **UniFi OS 5.1.19** - boot scripts verified via the [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer) deployment, which ships these scripts (or a superset). The SGMII+ kernel module was additionally verified directly — kernel and `qca-ssdk.ko` unchanged from 5.1.15, with a live load/unload test; see [docs/compat-5.1.19.md](docs/compat-5.1.19.md).
+- **UniFi OS 5.1.21 EA** - boot tweaks 06/07/10/15 verified in effect on a post-upgrade boot (incl. the fan tweak correctly re-tuning after the upgrade reset the SDB to stock), and the SGMII+ module verified directly — `qca-ssdk.ko` byte-identical to 5.1.19, with a live load/unload test; see [docs/compat-5.1.21.md](docs/compat-5.1.21.md).
 
 In addition, the bind-mount approach (the steady-state runtime behavior) has been in continuous use on a personal UCG-Fiber production gateway for several weeks, covering real traffic, Protect coexistence, nightly backups, and the full eMMC-write-pressure scenarios [documented in docs/](docs/emmc-write-pressure.md).
 
