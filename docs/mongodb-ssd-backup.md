@@ -12,13 +12,13 @@
 Once MongoDB is running on the SSD, the stock eMMC copy goes stale. This script installs a cron job that keeps current backups:
 
 - **Daily at 1:30am:** `mongodump` to SSD (`/volume1/unifi-db-backup/`) - zero eMMC impact
-- **Weekly (Sunday 1:35am):** `mongodump` to SSD + a compressed archive to eMMC (`/data/unifi/data/db-backup/unifi-db.archive.gz`)
+- **Weekly (Sunday 1:35am):** `mongodump` to SSD + a compressed `tar.gz` of that dump to eMMC (`/data/unifi/data/db-backup/unifi-db.tar.gz`)
 
-The eMMC archive is **off-SSD insurance, not a boot fallback.** The daily backups live on the SSD, so if the SSD itself dies the eMMC archive is a recent (≤1 week old) copy to hand-restore from. It is a `mongodump` archive, not a live database - it is not auto-loaded. Zero-touch boot recovery is handled by [`06-mongodb-ssd-offload.sh`](../scripts/06-mongodb-ssd-offload.sh): if the SSD is absent it leaves MongoDB on the stock eMMC data directory, which mongod opens directly.
+The eMMC archive is **off-SSD insurance, not a boot fallback.** The daily backups live on the SSD, so if the SSD itself dies the eMMC archive is a recent (≤1 week old) copy to hand-restore from. It is a compressed `mongodump`, not a live database - it is not auto-loaded. Zero-touch boot recovery is handled by [`06-mongodb-ssd-offload.sh`](../scripts/06-mongodb-ssd-offload.sh): if the SSD is absent it leaves MongoDB on the stock eMMC data directory, which mongod opens directly.
 
 ## Why Compress, and Dump to SSD First?
 
-The daily backup goes to the SSD only - zero eMMC impact. The weekly eMMC archive is written with `mongodump --gzip --archive`, which is ~12x smaller than a raw dump (e.g. ~41MB vs ~485MB). That keeps both the eMMC write burst and the on-disk footprint small - important because the writable overlay on these models is space-constrained, and a large write burst risks the same eMMC GC stalls we're trying to avoid. The eMMC write lands during low-traffic hours.
+The daily backup goes to the SSD only - zero eMMC impact. The weekly eMMC archive is just a `tar czf` of the SSD dump (no second `mongodump`, so it's light on RAM), and is ~12x smaller than a raw dump (e.g. ~41MB vs ~485MB). That keeps both the eMMC write burst and the on-disk footprint small - important because the writable overlay on these models is space-constrained, and a large write burst risks the same eMMC GC stalls we're trying to avoid. The eMMC write lands during low-traffic hours.
 
 ## What the Script Does
 
@@ -28,7 +28,7 @@ The boot script:
 
 The backup script:
 1. Runs `mongodump --port 27117` to SSD
-2. If called with `--emmc`, also writes a compressed `mongodump --gzip --archive` to eMMC (clearing any legacy uncompressed dump left by older versions)
+2. If called with `--emmc`, compresses the SSD dump to a `tar.gz` on eMMC (clearing any legacy uncompressed dump left by older versions)
 
 Logs go to `/tmp/mongodb-backup.log` (tmpfs, not eMMC).
 
@@ -43,14 +43,16 @@ Logs go to `/tmp/mongodb-backup.log` (tmpfs, not eMMC).
 
 # Check backup size
 du -sh /volume1/unifi-db-backup/
-du -sh /data/unifi/data/db-backup/unifi-db.archive.gz
+du -sh /data/unifi/data/db-backup/unifi-db.tar.gz
 
 # Check last backup log
 cat /tmp/mongodb-backup.log
 
-# Restore the eMMC archive (e.g. if the SSD died). Restores into the running
-# mongod, overwriting current data - see docs/recovery.md for full recovery flows.
-mongorestore --gzip --archive=/data/unifi/data/db-backup/unifi-db.archive.gz
+# Restore the eMMC archive (e.g. if the SSD died). Extract, then mongorestore
+# the dump into the running mongod, overwriting current data - see
+# docs/recovery.md for full recovery flows.
+mkdir -p /tmp/db-restore && tar xzf /data/unifi/data/db-backup/unifi-db.tar.gz -C /tmp/db-restore
+mongorestore /tmp/db-restore
 ```
 
 ## Cron Persistence
