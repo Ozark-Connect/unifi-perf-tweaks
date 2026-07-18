@@ -80,6 +80,9 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | 5.1.7 EA | 5.4.213-ui-ipq9574 | `ffffffc00894e200` |
 | 5.1.19 | 5.4.213-ui-ipq9574 | `ffffffc00894f200` |
 | 5.1.21 EA | 5.4.213-ui-ipq9574 | `ffffffc00894f200` |
+| 5.1.26 EA | 5.4.213-ui-ipq9574 | deferred to live test¹ |
+
+¹ 5.1.26 EA was verified statically only (no gateway on 5.1.26 yet), so the runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — has not been captured. The kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact), so the symbol resolves identically; the address is recorded when the live load test runs. See [compat-5.1.26.md](compat-5.1.26.md).
 
 The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
