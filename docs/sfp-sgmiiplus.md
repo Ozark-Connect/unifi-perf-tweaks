@@ -231,6 +231,43 @@ cat /var/log/sfp-sgmiiplus-eth5.log   # eth5
 dmesg | grep force_sgmiiplus
 ```
 
+### Boot-time retry
+
+The boot-time mode set does not always commit. `insmod` can succeed and the module
+can log `uniphy1 set to SGMII+ 2.5G` while the uniphy clock stays at 125 MHz and the
+port sits at NO-CARRIER against an SFP that has already switched to 2.5G. A set that
+*does* commit can still be reverted up to ~35s later when it happens early in boot.
+Which boots are affected is timing-dependent, so the same firmware and SFP can boot
+cleanly and fail on the next try.
+
+The scripts handle this themselves. After each `insmod` they require the clock to read
+312500000 Hz *and hold it for 45s* — a single read one second after load only proves a
+momentary state. On a mismatch the script `rmmod`s to restore stock SGMII 1G, waits up
+to 30s for the stock 1G link to recover, backs off, and retries; 5 attempts total.
+
+Success is judged on the clock only, never on carrier, so SFPs that are hard-locked at
+2.5G and cannot establish a 1G link still work.
+
+If all five attempts fail, the module is removed and the port is left in stock SGMII 1G
+state — the WAN keeps working at 1G instead of staying dead — and the script logs an
+ERROR and exits non-zero:
+
+```
+WARNING: Attempt 1 expected 312500000 Hz, got 125000000 Hz
+Removing force_uniphy1_sgmiiplus to restore stock SGMII 1G before retry
+eth6 stock 1G carrier recovered after 2s
+Retrying after 5s backoff
+Loading force_uniphy1_sgmiiplus (attempt 2/5)...
+Clock rate after attempt 2: 312500000 Hz
+Clock reached 312500000 Hz; verifying it holds for 45s
+Verified: uniphy1 running at 312.5 MHz (SGMII+ 2.5G) and held for 45s
+```
+
+The retry is deliberately bounded: if something on the host actively re-asserts 1G, an
+unbounded loop would flap the WAN forever. Worst case the loop runs ~7 minutes after the
+initial carrier wait, bouncing the port up to five times. It runs in the background, so
+`on_boot.d` is never blocked.
+
 ## Reverting
 
 ### Immediate (until next reboot)
