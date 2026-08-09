@@ -2,7 +2,9 @@
 
 Verified 2026-07-18 (UTC). Firmware `UCGF-5.1.26` (build string `UCGF.ipq9574.v5.1.26.6de03ba.260716.1422`) was expanded and analyzed statically on the RE host (`root@nas`); nothing was run on a gateway. The release `.bin` (`3c66-UCGF-5.1.26-335986d7-...bin`, md5 `e66f972e1fec0e86130fdd2d3da9d70e`) carries a zstd squashfs rootfs (`PARTrootfs`, 940,483,025 bytes) carved from offset `0xC56636`.
 
-**Scope:** SGMII+ kernel module (static) and the userland surface the deployed Performance Tweaks depend on (MongoDB SSD offload/backup 06/07, journald volatile 10, fan control 15). This is a **static-only** round — no gateway is running 5.1.26 yet (the field gateways are on older firmware), so the live SGMII+ load/unload is deferred to a NetworkOptimizer field deploy, same posture as the 5.1.19 round. Adaptive SQM and JVM heap are out of scope (not Performance Tweaks).
+**Scope:** SGMII+ kernel module (static) and the userland surface the deployed Performance Tweaks depend on (MongoDB SSD offload/backup 06/07, journald volatile 10, fan control 15). This began as a **static** verification round; 5.1.26 has **since been field-confirmed working on both UCG-Fiber and UXG-Fiber** — the SGMII+ SFP+ module and the boot tweaks run fine (user reports + our own gateways). That confirmation is operational, not instrumented: no UTC-bracketed lab load/unload, `dmesg` SGMII+ sequence, or `/proc/kallsyms` address was captured. Adaptive SQM and JVM heap are out of scope (not Performance Tweaks).
+
+**Field status (2026-08-07):** operational on UCG-Fiber + UXG-Fiber, SGMII+ module and tweaks both working. Only outstanding item is formal lab instrumentation (captured `dmesg`/`kallsyms`).
 
 ## Kernel & qca-ssdk
 
@@ -53,7 +55,7 @@ None of these are referenced by the module's logic or affect any symbol/offset i
 
 Both repo modules — `force-uniphy1-sgmiiplus/force_uniphy1_sgmiiplus.ko` and `force-uniphy2-sgmiiplus/force_uniphy2_sgmiiplus.ko` — carry vermagic `5.4.213-ui-ipq9574`, matching the firmware kernel. Combined with the code-identical qca-ssdk (all 10 kallsyms targets and both cache offsets intact), the modules will `insmod` and resolve on 5.1.26 without a rebuild.
 
-**Live test deferred:** no gateway is running 5.1.26 yet. When one is upgraded, exercise the module per SOP (manual `insmod`/`rmmod` on an empty/down port, UTC-bracketed, live trunk watched) and confirm the `dmesg` pr_info sequence (`resolved all symbols` → `port bitmap 0x62 -> 0x42` → `uniphy1 set to SGMII+ 2.5G` → `speed cache ... -> 2500`). Note `clk_rate` is not a mode discriminator on 5.1.19+; verify via `dmesg`, not clock rate.
+**Field-confirmed operational; formal lab capture still outstanding.** 5.1.26 is reported working in the field on UCG-Fiber and UXG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — the practical live gap from the earlier static-only framing is closed. What was *not* captured is instrumented evidence: to formally close that out on a future box, exercise the module per SOP (manual `insmod`/`rmmod` on an empty/down port, UTC-bracketed, live trunk watched) and confirm the `dmesg` pr_info sequence (`resolved all symbols` → `port bitmap 0x62 -> 0x42` → `uniphy1 set to SGMII+ 2.5G` → `speed cache ... -> 2500`). Note `clk_rate` is not a mode discriminator on 5.1.19+; verify via `dmesg`, not clock rate.
 
 ## Boot Tweak Userland (static presence check against extracted rootfs)
 
@@ -68,4 +70,4 @@ The `on_boot.d` runner (`udm-boot`) is deployed alongside the scripts by Network
 
 ## Conclusion
 
-UniFi OS 5.1.26 EA is **statically compatible**. The SGMII+ module is guaranteed by construction: the kernel is unchanged and `qca-ssdk.ko` is code-identical to the verified 5.1.19/5.1.21 SSDK (`.text` byte-identical, zero disassembly diff, all 10 symbols and both cache offsets intact) — the differing md5 traces entirely to build-id, an embedded build timestamp, and a Jenkins job-id path string, none in code. All four deployed Performance Tweaks (06/07/10/15) have their userland dependencies present in the 5.1.26 rootfs. Remaining gap vs the 5.1.21 round: the live SGMII+ load/unload and the "tweaks in effect" checks, both deferred to a NetworkOptimizer field deploy once a gateway is on 5.1.26.
+UniFi OS 5.1.26 EA is **statically compatible**. The SGMII+ module is guaranteed by construction: the kernel is unchanged and `qca-ssdk.ko` is code-identical to the verified 5.1.19/5.1.21 SSDK (`.text` byte-identical, zero disassembly diff, all 10 symbols and both cache offsets intact) — the differing md5 traces entirely to build-id, an embedded build timestamp, and a Jenkins job-id path string, none in code. All four deployed Performance Tweaks (06/07/10/15) have their userland dependencies present in the 5.1.26 rootfs, and 5.1.26 is now **field-confirmed working on UCG-Fiber and UXG-Fiber** (SGMII+ module + boot tweaks, per user reports and our own gateways). The only outstanding item vs the fully-instrumented 5.1.21 round is captured lab diagnostics — a UTC-bracketed SGMII+ load/unload with `dmesg`/`kallsyms` — which were not taken during operational use.
