@@ -82,8 +82,9 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | 5.1.21 EA | 5.4.213-ui-ipq9574 | `ffffffc00894f200` |
 | 5.1.26 EA | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 5.1.28 EA | 5.4.213-ui-ipq9574 | deferred to live test¹ |
+| 5.1.29 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 
-¹ 5.1.26 EA and 5.1.28 EA were verified statically only (no gateway on those releases yet), so the runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — has not been captured. The kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; 5.1.28's `.ko` is in fact byte-identical to 5.1.26's), so the symbol resolves identically; the address is recorded when the live load test runs. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md).
+¹ 5.1.26 EA, 5.1.28 EA, and 5.1.29 were verified statically only (no gateway on those releases yet), so the runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — has not been captured. The kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28 and 5.1.29 `.ko`s are in fact byte-identical to 5.1.26's), so the symbol resolves identically; the address is recorded when the live load test runs. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md).
 
 The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
