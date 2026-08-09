@@ -2,7 +2,7 @@
 
 Verified 2026-06-26 on a test UCG-Fiber running UniFi OS 5.1.21 EA. All timestamps UTC. The gateway booted `2026-06-26 15:41:15Z`; udm-boot finished `status=0/SUCCESS`.
 
-**Scope:** SGMII+ kernel module (static + live) and the Network Optimizer Performance Tweaks deployed on this box: MongoDB SSD offload/backup (06/07), journald volatile (10), fan control (15). Adaptive SQM and JVM heap are out of scope (not Performance Tweaks).
+**Scope:** SGMII+ kernel module (static + live) and the Network Optimizer Performance Tweaks deployed on this box: MongoDB SSD offload/backup (06+07), journald volatile (10), fan control (15). Adaptive SQM and JVM heap are out of scope (not Performance Tweaks).
 
 ## Kernel & qca-ssdk
 
@@ -56,4 +56,4 @@ udm-boot ran 06 → 07 → 10 → 15 in order and exited `status=0`. No tweak-at
 
 ## Conclusion
 
-UniFi OS 5.1.21 EA is **fully compatible**. The SGMII+ module is statically guaranteed (qca-ssdk byte-identical to verified 5.1.19) and passed a live load/unload test with the live trunk undisturbed. All four deployed Performance Tweaks (06/07/10/15) are confirmed in effect, with the fan tweak correctly re-tuning after the upgrade reset the SDB to stock.
+UniFi OS 5.1.21 EA is **fully compatible**. The SGMII+ module is statically guaranteed (qca-ssdk byte-identical to verified 5.1.19) and passed a live load/unload test with the live trunk undisturbed. All four deployed Performance Tweaks (06+07+10+15) are confirmed in effect, with the fan tweak correctly re-tuning after the upgrade reset the SDB to stock.
