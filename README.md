@@ -239,7 +239,7 @@ SFP+ port status check - reads the uniphy SerDes registers and clock rates for b
 ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/sfp-link-check.sh
 ```
 
-Reports the actual physical-layer speed by reading uniphy SerDes registers directly. Useful for confirming the SGMII+ module is working. With module v4+, `ethtool` and the UniFi UI also report 2500 Mbps correctly.
+Reports the actual physical-layer speed by reading uniphy SerDes registers directly. Useful for confirming the SGMII+ module is working; `ethtool` and the UniFi UI should also report 2500 Mbps correctly.
 
 ## Reverting
 
