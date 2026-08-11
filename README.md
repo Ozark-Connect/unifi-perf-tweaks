@@ -100,8 +100,10 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`07-mongodb-ssd-backup.sh`](scripts/07-mongodb-ssd-backup.sh) | 07 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
-| [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
-| [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
+| [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
+| [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
+
+> **SGMII+ (`19` / `20`):** Promoted from Testing to Stable — the modules have been running continuously on production UCG-Fiber and UXG-Fiber gateways for a couple months, across every UniFi OS release from 5.1.15 through 5.1.29. Deploy **one script at a time**: loading both modules simultaneously is not supported (see the [port bitmap caveat](docs/sfp-sgmiiplus.md#port-bitmap-exclusion)).
 
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
 
