@@ -89,7 +89,7 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 
 ¹ The runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — was not captured for 5.1.26, 5.1.28, 5.1.29, 5.1.30, or 5.1.31. 5.1.26 is **field-confirmed working on UCG-Fiber and UXG-Fiber**, and 5.1.28 on the UCG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — our UXG-Fiber had no 5.1.28 build offered to it, going 5.1.26 → 6.0.x. But that was operational use rather than an instrumented load test, so no `dmesg`/kallsyms was recorded; 5.1.29, 5.1.30, and 5.1.31 are bench-verified only. In all five the kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28, 5.1.29, 5.1.30, and 5.1.31 `.ko`s are byte-identical to 5.1.26's), so the symbol resolves identically; the address gets recorded whenever an instrumented load test is run. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md) / [compat-5.1.30.md](compat-5.1.30.md) / [compat-5.1.31.md](compat-5.1.31.md).
 
-² **6.0.5 closes the kallsyms gap** — it is the first round since 5.1.21 with a live captured address, taken from a UXG-Fiber running 6.0.5 with the module loaded. All ten symbols resolved:
+² **6.0.5 closes the kallsyms gap** — first live capture since 5.1.21, taken from a UXG-Fiber with the module loaded. All ten resolved:
 
 | Symbol | Address | Type |
 |---|---|---|
