@@ -85,8 +85,26 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | 5.1.29 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 5.1.30 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 5.1.31 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
+| 6.0.5 EA | 5.4.213-ui-ipq9574 (rebuilt) | `ffffffc008934488` ² |
 
-¹ The runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — was not captured for 5.1.26, 5.1.28, 5.1.29, 5.1.30, or 5.1.31. 5.1.26 is **field-confirmed working on UCG-Fiber and UXG-Fiber**, and 5.1.28 on the UCG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — our UXG-Fiber tops out at 5.1.26. But that was operational use rather than an instrumented load test, so no `dmesg`/kallsyms was recorded; 5.1.29, 5.1.30, and 5.1.31 are bench-verified only. In all five the kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28, 5.1.29, 5.1.30, and 5.1.31 `.ko`s are byte-identical to 5.1.26's), so the symbol resolves identically; the address gets recorded whenever an instrumented load test is run. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md) / [compat-5.1.30.md](compat-5.1.30.md) / [compat-5.1.31.md](compat-5.1.31.md).
+¹ The runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — was not captured for 5.1.26, 5.1.28, 5.1.29, 5.1.30, or 5.1.31. 5.1.26 is **field-confirmed working on UCG-Fiber and UXG-Fiber**, and 5.1.28 on the UCG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — our UXG-Fiber had no 5.1.28 build offered to it, going 5.1.26 → 6.0.x. But that was operational use rather than an instrumented load test, so no `dmesg`/kallsyms was recorded; 5.1.29, 5.1.30, and 5.1.31 are bench-verified only. In all five the kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28, 5.1.29, 5.1.30, and 5.1.31 `.ko`s are byte-identical to 5.1.26's), so the symbol resolves identically; the address gets recorded whenever an instrumented load test is run. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md) / [compat-5.1.30.md](compat-5.1.30.md) / [compat-5.1.31.md](compat-5.1.31.md).
+
+² **6.0.5 closes the kallsyms gap** — it is the first round since 5.1.21 with a live captured address, taken from a UXG-Fiber running 6.0.5 with the module loaded. All ten symbols resolved:
+
+| Symbol | Address | Type |
+|---|---|---|
+| `adpt_hppe_uniphy_mode_set` | `ffffffc008934488` | t |
+| `_adpt_hppe_port_interface_mode_set` | `ffffffc00891fc08` | t |
+| `ssdk_dt_global_set_mac_mode` | `ffffffc0089dcfdc` | t |
+| `qca_ssdk_port_bmp_get` | `ffffffc0089713e0` | t |
+| `qca_ssdk_port_bmp_set` | `ffffffc0089713c0` | t |
+| `ssdk_phy_priv_data_get` | `ffffffc0089e1910` | t |
+| `ssdk_port_link_notify` | `ffffffc0089ade38` | t |
+| `ubnt_send_phy_event` | `ffffffc0089207a4` | t |
+| `ssdk_mac_sw_sync_work_stop` | `ffffffc0089e1948` | T |
+| `ssdk_mac_sw_sync_work_start` | `ffffffc0089e19a4` | T |
+
+Note 6.0.5 shifts these addresses (the kernel and `qca-ssdk.ko` were both rebuilt under the Debian 13 / GCC 14 rebase), which is exactly why the module resolves by name at runtime rather than hardcoding addresses. See [compat-6.0.5.md](compat-6.0.5.md).
 
 The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
