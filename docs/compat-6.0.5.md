@@ -6,6 +6,8 @@ Platform: **UXG-Fiber** running 6.0.5 EA in production (upgraded 2026-09-03 08:5
 
 **Scope:** this round is **live/field on a UXG-Fiber** for the SGMII+ module and boot tweaks 10 + 15, plus a static release-image check. Tweaks **06 + 07 (MongoDB SSD offload/backup) are out of scope and unverified** — the UXG-Fiber has no SSD and, as confirmed below, ships no MongoDB at all. Adaptive SQM and JVM heap remain out of scope (not Performance Tweaks).
 
+This round is UXG-Fiber-only for a reason worth recording: **6.0.5 EA has not been released for the UCG-Fiber.** The UXG-Fiber got it first, which is a reversal of the usual order — the UCG-Fiber is our primary test platform and normally leads. Every previous compat round was anchored on a UCGF image, so this is the first round with no UCGF baseline available at all.
+
 All gateway actions were read-only and UTC-bracketed. Binary analysis was done on the RE host (`root@nas`) against the pulled `.ko` and the extracted release rootfs — nothing was disassembled on the gateway.
 
 ## Kernel
@@ -159,7 +161,7 @@ Out of scope this round and genuinely unverifiable on this platform. The UXG-Fib
 
 - Absent: `mongod`, `mongodump`, `mongorestore`, `/usr/lib/unifi/bin/mongod`, `unifi.service`, `unifi-mongodb.service`.
 
-This is a UXG-Fiber platform trait, **not a 6.0.5 regression**. Verifying 06 + 07 on 6.0.5 requires a UCG-Fiber (or UDM-SE) on 6.0.5. The shared userland these scripts also depend on is present: `ubnt-device-info`, `findmnt`, `mountpoint`, `tar`, `gzip`, `logger`.
+This is a UXG-Fiber platform trait, **not a 6.0.5 regression**. Verifying 06 + 07 on 6.0.5 requires a UCG-Fiber (or UDM-SE) on 6.0.5 — which is not yet possible, as 6.0.5 EA has not been released for the UCG-Fiber (see Outstanding). The shared userland these scripts also depend on is present: `ubnt-device-info`, `findmnt`, `mountpoint`, `tar`, `gzip`, `logger`.
 
 ### 19 + 20 — SFP SGMII+ ✓
 
@@ -191,7 +193,7 @@ The other headline is that the trixie rebase moved Python 3.9 → 3.13 and syslo
 
 ### Outstanding
 
-- **UCG-Fiber on 6.0.5 is not covered.** No UCGF 6.0.5 image was analyzed this round, so the UCGF SSDK md5 is unknown and may differ from the UXGF build. Every pre-6.0 reference `.ko` in `research/qca-ssdk-compare/` came from UCGF images, so strictly the `151a68f1…` md5 change is confounded between "6.0.5 vs 5.1.31" and "UXGF vs UCGF" — the GCC evidence makes the toolchain explanation overwhelmingly likely, but a UCGF 6.0.5 image would settle it and extend coverage.
+- **UCG-Fiber on 6.0.5 is not covered, and cannot be yet — 6.0.5 EA has not been released for the UCG-Fiber.** Unusually, the UXG-Fiber got this release first; normally the UCG-Fiber (our primary test platform) leads. So there is no UCGF 6.0.5 image to analyze, and the UCGF SSDK md5 for 6.0.x is simply unknown until Ubiquiti ships it. This also means the `151a68f1…` md5 change is, strictly speaking, confounded between "6.0.5 vs 5.1.31" and "UXGF vs UCGF", because every pre-6.0 reference `.ko` in `research/qca-ssdk-compare/` was carved from a UCGF image. The GCC 10 → 14 `.comment` evidence makes the toolchain explanation overwhelmingly likely, and none of the live results depend on resolving it. **The clean way to settle it without waiting for UCGF 6.0.5** is a UXGF **5.1.26** image (the UXG-Fiber's last 5.1.x before it jumped to 6.0.x): if its `qca-ssdk.ko` md5 is `8033a7fa…`, matching the UCGF 5.1.26 reference, then the SSDK is platform-independent and the 6.0.5 delta is purely a version/toolchain change.
 - **Tweaks 06 + 07 unverified on 6.0.5** — needs an SSD-equipped UCG-Fiber or UDM-SE on 6.0.5.
 - **Module unload/revert path not exercised** on 6.0.5 (production WAN rides `eth6`); needs a lab box.
 - **`force_uniphy2_sgmiiplus.ko` untested** on 6.0.5 (rests on shared static evidence).
