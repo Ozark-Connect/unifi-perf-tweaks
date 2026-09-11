@@ -95,11 +95,21 @@ This is the first 6.0.x image with MongoDB in it (the UXG-Fiber ships none), so 
 
 Stock `journald.conf` ships `Storage=persistent` / `ForwardToSyslog=yes` (the script will flip both). syslog-ng 4.8.1 with the same `conf.d` layout: 15 config files, 12 of which declare local `file("/var/log...")` destinations outside `ulog`, which is the set the script comments out. `/etc/default/syslog-ng-persist` is present with the stock `--persist-file=/var/log/.syslog-ng.persist`, which the script redirects to tmpfs. All identical in shape to what script 10 handled live on 6.0.5.
 
-### 15 — fan control ✓ with one caveat
+### 15 — fan control ✗ CORRECTED 2026-09-10: script targeted the wrong daemon
 
-`uhwd.service` + `/usr/sbin/uhwd` present, `python3` → 3.13.5, and the SDB client is at the unchanged import path (`ustd/statusdb/sdb_client.cpython-313-aarch64-linux-gnu.so`).
+**This section originally read "✓ with one caveat". The caveat was the wrong one.**
 
-**Caveat:** `ustd` moved 6.0.4 → 6.0.6 and both `sdb_client…so` (md5 `5972f32f…` → `34462f1b…`) and `uhwd` changed. Script 15 uses only `SDBClient().run()`, `.get("config.fan")` and `.update("config.fan", …)`. The Cython 3.1 build compresses its string table, so the method names cannot be confirmed from `strings`, and an attempt to import the module under a qemu-user chroot on the RE host did not complete (see Outstanding). The risk is low, since this is the client's most basic API and 6.0.5's `ustd 6.0.4` build of the same cpython-313 module worked live, but it is unconfirmed until a live run logs `BEFORE`/`AFTER` setpoints.
+The SDB client API was never the problem — `SDBClient().run()` / `.get()` / `.update()` all work on `ustd` 6.0.6, confirmed live on 6.0.7. The real defect is that **UniFi OS 6.0 moved fan control out of `uhwd` into a new dedicated daemon, `ufcd`**, which exists in no 5.1.x image. Script 15 wrote its setpoints to SDB then restarted `uhwd`, which on 6.0.x no longer touches `pwm1`. `ufcd` was never signalled and kept running the factory setpoints from `FAN_CONFIG_MAPPING['a6a8']` (cpu 100 / hdd 68 / rtl8372 109 / rtl8261 103).
+
+Field symptom on a 6.0.7 UCG-Fiber upgraded from 5.1.34: CPU at 72 °C against a tuned 65 °C setpoint, fan flat at pwm 38 (the 15% floor). That matched the factory setpoints exactly, not the tuned ones. Re-running the script changed nothing, because it restarted `uhwd` again.
+
+`ufcd.service` is present and enabled in the 6.0.7 rootfs (`etc/systemd/system/local-fs.target.wants/ufcd.service`), runs `/usr/sbin/ufcd -j`, and loads `ustd/hwmon/fan_ctrl_sm.so`. **Stock 6.0.x fan control is not broken** — only our script's assumption about which daemon owns it.
+
+Fixed in `15-fan-control-tuning.sh` by detecting the owner at runtime (`systemctl cat ufcd.service`), preserving 5.1.x behaviour. Mechanism proven on 6.0.5; the corrected script is not yet field-verified on 6.0.7.
+
+Supporting userland, unchanged: `uhwd.service` + `/usr/sbin/uhwd` present, `python3` → 3.13.5, and the SDB client at the unchanged import path (`ustd/statusdb/sdb_client.cpython-313-aarch64-linux-gnu.so`).
+
+The original caveat — that `ustd` 6.0.4 → 6.0.6 might have changed the `SDBClient` API, unverifiable from `strings` because Cython 3.1 compresses its string table — is now closed. Importing the module directly on the gateway resolves `run`, `get` and `update` as before. The lesson is that a static check flagged the wrong risk entirely: the API was fine and the daemon ownership, which I never checked, was the actual break.
 
 ### 19 + 20 — SFP SGMII+ ✓
 
@@ -109,13 +119,16 @@ Stock `journald.conf` ships `Storage=persistent` / `ForwardToSyslog=yes` (the sc
 
 **6.0.7 is statically compatible on the UCG-Fiber.** `qca-ssdk.ko` is `.text`-byte-identical to the live-verified 6.0.5 SSDK (40 whole-file bytes differ, all build provenance), every other common kernel module is `.text`-identical, vermagic is unchanged, and all 10 symbols, the 114-symbol uniphy family and the `0x690`/`0x6d0` cache offsets are intact. All four deployed Performance Tweaks have their userland present, and this is the first 6.0.x image on which 06+07 could be checked at all.
 
+**Corrected 2026-09-10:** "all four deployed Performance Tweaks have their userland present" was true and also beside the point for tweak 15. Presence of `uhwd` told us nothing, because 6.0.x moved fan control to `ufcd` — a *new* daemon whose absence from the 5.1.x baseline I never checked for. A static presence check can only confirm the things you think to look for; it cannot flag a component that was added. See the tweak 15 section.
+
 The one thing static analysis cannot settle is the release-note SFP negotiation change, which is outside the SSDK and could in principle interact with the forced SGMII+ mode at runtime. Live verification on a UCG-Fiber running 6.0.7 is the next step and should be done on the lab box before any production deploy.
 
 ### Outstanding
 
 - **Live check on a UCG-Fiber on 6.0.7** (lab box first): full `dmesg` sequence, `ethtool` at 2500Mb/s held across a link flap and cable re-seat, `rmmod` revert path, and 06+07+10+15 in effect after the upgrade's config reset.
 - **Kernel image diff 6.0.5 → 6.0.7** to localize the SFP negotiation change (both FIT images are on the RE host).
-- **SDB client API confirmation** for script 15 on `ustd 6.0.6` (live, or a working qemu-user chroot).
+- **Field-verify the corrected script 15** on a 6.0.7 UCG-Fiber. The `ufcd` mechanism is proven on 6.0.5; the runtime daemon detection is verified, but the fixed script has not yet run at boot on 6.0.7.
+- **A future-release check worth adding to the SOP:** diff the systemd unit set against the previous release. `ufcd.service` was a new unit in 6.0.x and that single fact would have caught this immediately.
 - **UCGF 5.1.31 → 6.0.7 image diff** for a same-platform account of the trixie rebase. Needs the 5.1.31 `.bin` re-downloaded; it is no longer on the RE host.
 - `force_uniphy2_sgmiiplus.ko` untested on 6.0.x.
 

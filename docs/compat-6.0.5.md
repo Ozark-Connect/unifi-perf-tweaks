@@ -123,7 +123,9 @@ Every round since 5.1.26 carried "no captured `dmesg`/kallsyms" as outstanding. 
 
 The upgrade reset stock config in two places and both tweaks re-applied on the post-upgrade boot, same pattern as the 5.1.21 upgrade. `udm-boot.service` finished `status=0/SUCCESS` with no tweak errors.
 
-### 15 — fan control ✓
+### 15 — fan control ✗ CORRECTED 2026-09-10: wrote successfully, never took effect
+
+**This section originally read "✓". That was wrong, and the error is instructive.**
 
 From `/var/log/fan-control-tuning.log`:
 
@@ -132,7 +134,15 @@ BEFORE: setpoints={"cpu": 100, "rtl8372": 109, "rtl8261": 103} standby=20
 AFTER:  setpoints={"cpu": 65, "rtl8372": 85, "rtl8261": 90} standby=20
 ```
 
-Live SDB read-back confirms it held. Fan at 1931 RPM / pwm 38, sensors 56.2–60.4 °C. The UXG-Fiber has no `hdd` PID category (no drive), which the script's `if "hdd" in pid` guard handles.
+Live SDB read-back confirmed the values held, and that is all it confirmed. **The SDB write landed; the PID loop never consumed it.** UniFi OS 6.0 moved fan control out of `uhwd` into a new dedicated daemon, `ufcd` ("UI fan control daemon"), which does not exist in 5.1.x. Script 15 restarted `uhwd`, so `ufcd` was never told to re-read and kept running on the factory setpoints it loaded at boot.
+
+The reported "Fan at 1931 RPM / pwm 38" was the tell and I misread it: pwm 38 is exactly the 15% `min_output` floor. It was consistent with the factory setpoints (cpu 100 / rtl8372 109 / rtl8261 103), not the tuned ones.
+
+Verified 2026-09-10 on this same gateway: setting the CPU setpoint to 45 °C against a 58 °C CPU produced no fan movement across a `uhwd` restart. Restarting `ufcd` instead ramped the fan 38 → 204 pwm (1,927 → 7,021 rpm) within 50 seconds.
+
+**Method error to avoid repeating:** reading a config value back proves the write, not the effect. Verify a control loop by perturbing it and observing the actuator.
+
+Fixed in `15-fan-control-tuning.sh` by detecting the owning daemon at runtime. The UXG-Fiber has no `hdd` PID category (no drive), which the script's `if "hdd" in pid` guard handles.
 
 **The Python jump is a non-issue here, but only just.** `python3.9` is gone (`python3` → 3.13.5) and the SDB client is now `cpython-313`. Script 15 calls plain `python3` and imports `from ustd.statusdb.sdb_client import SDBClient`; both the symlink and the import path are unchanged. A version-pinned `python3.9` call would have broken.
 
@@ -159,7 +169,9 @@ Unverifiable on this platform. 6.0.5 for UXG-Fiber ships **no MongoDB and no Net
 
 ## Conclusion
 
-**6.0.5 is compatible on the UXG-Fiber, field-confirmed.** The SGMII+ module loads, the 2.5G datapath carries production WAN traffic error-free, and tweaks 10 and 15 are verified in effect after correctly re-applying over the upgrade's config reset.
+**6.0.5 is compatible on the UXG-Fiber, field-confirmed.** The SGMII+ module loads and the 2.5G datapath carries production WAN traffic error-free.
+
+**Corrected 2026-09-10:** this conclusion originally claimed tweaks 10 *and 15* were "verified in effect". Tweak 10 was. **Tweak 15 was not** — it wrote its setpoints to SDB but restarted the wrong daemon, so the fan kept running on factory values. See the tweak 15 section above. Fixed in the script; the fix is not yet field-verified on 6.0.5.
 
 `qca-ssdk.ko` changed for the first time since 5.1.19, but it is a GCC 10 → 14 recompile with an unchanged ABI: all 10 symbols present, 114 uniphy/sgmii symbols, identical `.data`/`.bss` sizes, a symbol delta that is pure compiler churn, and cache offsets confirmed by byte-identical `sfp_read_status` encodings then corroborated live. A UXGF 5.1.26 control rules out any platform contribution. vermagic is unchanged, so no rebuild is needed.
 

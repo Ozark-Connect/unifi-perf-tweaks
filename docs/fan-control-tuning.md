@@ -1,8 +1,8 @@
 # fan-control-tuning
 
 **Script:** [`scripts/15-fan-control-tuning.sh`](../scripts/15-fan-control-tuning.sh)
-**Compatibility:** Any UCG model with `uhwd` + SDB fan control (UCG-Fiber, UCG-Max, others with PID-controlled fans)
-**Risk level:** Low - uses the official SDB API, non-persistent (resets on uhwd restart)
+**Compatibility:** Any UCG model with `uhwd`/`ufcd` + SDB fan control (UCG-Fiber, UCG-Max, others with PID-controlled fans)
+**Risk level:** Low - uses the official SDB API, non-persistent (resets when the fan daemon restarts)
 
 ## Problem
 
@@ -26,14 +26,37 @@ Most community fan control scripts run a background loop that continuously reads
 
 This script takes a different approach: it tunes the **existing** PID controller's setpoints via the official SDB API. One-shot at boot, no background process, no eMMC wear, no fighting with uhwd. The PID controller does what it was designed to do - just with better targets.
 
+## Which daemon owns the fan loop
+
+This changed in UniFi OS 6.0 and it is the single most important detail in this tweak.
+
+| UniFi OS | Daemon running the PID loop | Notes |
+|---|---|---|
+| 5.1.x and earlier | `uhwd` | `ufcd` does not exist in the image at all |
+| 6.0.x and later | **`ufcd`** ("UI fan control daemon") | `uhwd` no longer writes PWM |
+
+On 6.0.x the fan loop lives in `ufcd.service`, which loads `ustd/hwmon/fan_ctrl_sm.so`. `uhwd` still runs and still reports thermal telemetry, but it never touches `pwm1`.
+
+Writing `config.fan` to SDB never triggers a re-read on its own, so the **owning** daemon has to be restarted. Restarting the wrong one fails silently in a way that is easy to miss:
+
+- The SDB write succeeds.
+- Reading `config.fan` back shows the tuned setpoints.
+- The script logs a clean `BEFORE`/`AFTER`.
+- The fan keeps running on the **factory** setpoints it loaded at boot.
+
+Confirmed on a UXG-Fiber running 6.0.5: with the CPU setpoint at 45 °C against a 58 °C CPU, the fan stayed pinned at its 15% floor (pwm 38) through a `uhwd` restart. Restarting `ufcd` instead ramped it immediately — pwm 38 → 82 → 127 → 195 → 204, and 1,927 → 7,021 rpm — then settled back to the floor once temperatures dropped below the tuned setpoints.
+
+The script detects the owner at runtime with `systemctl cat ufcd.service`, so one script covers both generations.
+
 ## What the Script Does
 
-1. Waits for `uhwd.service` to start (up to 2 minutes)
-2. Connects to the Status Database (SDB) via Python
-3. Reads the current `config.fan` PID configuration
-4. Overwrites temperature setpoints with lower values
-5. Restarts `uhwd` so the running PID loop picks up the changes
-6. Logs before/after values and exits
+1. Detects whether `ufcd` or `uhwd` owns the fan loop
+2. Waits for that daemon to become active (up to 2 minutes)
+3. Connects to the Status Database (SDB) via Python
+4. Reads the current `config.fan` PID configuration
+5. Overwrites temperature setpoints with lower values
+6. Restarts **the owning daemon** so the running PID loop picks up the changes
+7. Logs before/after values plus a PWM/RPM snapshot, and exits
 
 ## Configuration
 
@@ -66,7 +89,7 @@ If your gateway has different category names than `cpu`, `hdd`, `rtl8372`, `rtl8
 
 ## PID Controller Background
 
-`uhwd` uses a PID (Proportional-Integral-Derivative) algorithm per temperature category. Each category is an array of 11 values:
+The fan daemon uses a PID (Proportional-Integral-Derivative) algorithm per temperature category. Each category is an array of 11 values:
 
 | Index | Field | Description |
 |---|---|---|
@@ -84,7 +107,18 @@ If your gateway has different category names than `cpu`, `hdd`, `rtl8372`, `rtl8
 
 With negative Kp and a high setpoint, the PID output stays at minimum until temperatures approach the setpoint. Lowering the setpoint makes the PID respond at lower temperatures - the fan engages earlier and keeps components cooler.
 
-We only change index 0 (setpoint) and `standby` (minimum PWM). All other PID parameters remain at uhwd defaults.
+We only change index 0 (setpoint) and `standby` (minimum PWM). All other PID parameters remain at factory defaults.
+
+The factory defaults themselves live in `ustd/tools/uhardware_fan.py` as `FAN_CONFIG_MAPPING`, keyed by sysid (`a6aa` = UXG-Fiber, `a6a8` = UCG-Fiber). Read your model's stock table without guessing:
+
+```bash
+python3 -c "
+import json
+import ustd.tools.uhardware_fan as uf
+sysid = uf.load_sysid(True)
+print(sysid, json.dumps(uf.FAN_CONFIG_MAPPING[sysid], indent=2))
+"
+```
 
 ## Verification
 
@@ -99,6 +133,21 @@ cat /var/log/fan-control-tuning.log
 # Re-check config.fan (use the python command above)
 ```
 
+**Reading `config.fan` back is not proof the setpoints are in effect.** It only proves the SDB write landed. SDB retains whatever was written whether or not any daemon consumed it.
+
+To confirm the loop is actually live, check that the fan daemon has the state machine loaded:
+
+```bash
+# 6.0.x
+sudo grep -c fan_ctrl_sm /proc/$(pgrep -x ufcd)/maps    # expect 4, not 0
+# 5.1.x
+sudo grep -c fan_ctrl_sm /proc/$(pgrep -x uhwd)/maps
+```
+
+The honest functional test is to temporarily set a setpoint below a component's current temperature, restart the owning daemon, and watch `pwm1` climb. Put the setpoint back afterwards.
+
+A low PWM on its own is **not** a failure. When every component sits below its setpoint the PID correctly parks the fan at its floor (`min_output` 15% = pwm 38 on UCG/UXG-Fiber). Judge the result against the temperatures, not against the PWM alone.
+
 ### Measured Results (UCG-Fiber)
 
 | PWM | RPM | Thermal Impact |
@@ -110,14 +159,14 @@ cat /var/log/fan-control-tuning.log
 
 ## Reverting
 
-Remove the boot script and reboot - uhwd re-initializes `config.fan` to stock defaults during a full boot:
+Remove the boot script and reboot - the fan daemon re-initializes `config.fan` to stock defaults during a full boot:
 
 ```bash
 rm /data/on_boot.d/15-fan-control-tuning.sh
 reboot
 ```
 
-**Note:** `systemctl restart uhwd` alone does **not** clear tuned values from the SDB. The SDB retains PID setpoints across uhwd restarts. To revert without rebooting, write stock defaults back to the SDB explicitly:
+**Note:** restarting the fan daemon alone does **not** clear tuned values from the SDB. The SDB retains PID setpoints across daemon restarts. To revert without rebooting, write stock defaults back to the SDB explicitly:
 
 ```bash
 python3 << 'EOF'
@@ -137,7 +186,7 @@ fan["standby"] = 20
 c.update("config.fan", fan)
 time.sleep(1)
 EOF
-systemctl restart uhwd
+systemctl restart "$(systemctl cat ufcd.service >/dev/null 2>&1 && echo ufcd || echo uhwd)"
 ```
 
 *Updated May 2026: previous versions stated `systemctl restart uhwd` was sufficient to revert. Testing on firmware 5.0.16 confirmed the SDB retains tuned values across uhwd restarts. A full reboot or explicit SDB reset is required.*
