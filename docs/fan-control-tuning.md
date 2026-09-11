@@ -66,8 +66,8 @@ Edit the variables at the top of the script:
 CPU_SETPOINT=65     # Default: 100
 HDD_SETPOINT=55     # Default: 68
 RTL8372_SETPOINT=85 # Default: 109
-RTL8261_SETPOINT=80 # Default: 103
-STANDBY=30          # Default: 20 (minimum PWM)
+RTL8261_SETPOINT=90 # Default: 103
+STANDBY=20          # Default: 20 (minimum PWM, left at stock)
 ```
 
 ### Before You Apply: Check Your Model
@@ -107,7 +107,7 @@ The fan daemon uses a PID (Proportional-Integral-Derivative) algorithm per tempe
 
 With negative Kp and a high setpoint, the PID output stays at minimum until temperatures approach the setpoint. Lowering the setpoint makes the PID respond at lower temperatures - the fan engages earlier and keeps components cooler.
 
-We only change index 0 (setpoint) and `standby` (minimum PWM). All other PID parameters remain at factory defaults.
+We only change index 0 (setpoint). `standby` is written back at its stock value of 20, since its exact role is not fully established. All other PID parameters remain at factory defaults.
 
 The factory defaults themselves live in `ustd/tools/uhardware_fan.py` as `FAN_CONFIG_MAPPING`, keyed by sysid (`a6aa` = UXG-Fiber, `a6a8` = UCG-Fiber). Read your model's stock table without guessing:
 
