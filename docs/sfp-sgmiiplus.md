@@ -86,6 +86,7 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | 5.1.30 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 5.1.31 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 6.0.5 EA | 5.4.213-ui-ipq9574 (rebuilt) | `ffffffc008934488` ² |
+| 6.0.10 | 5.4.213-ui-ipq9574 (rebuilt) | `ffffffc008934488` ³ |
 
 ¹ The runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — was not captured for 5.1.26, 5.1.28, 5.1.29, 5.1.30, or 5.1.31. 5.1.26 is **field-confirmed working on UCG-Fiber and UXG-Fiber**, and 5.1.28 on the UCG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — our UXG-Fiber had no 5.1.28 build offered to it, going 5.1.26 → 6.0.x. But that was operational use rather than an instrumented load test, so no `dmesg`/kallsyms was recorded; 5.1.29, 5.1.30, and 5.1.31 are bench-verified only. In all five the kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28, 5.1.29, 5.1.30, and 5.1.31 `.ko`s are byte-identical to 5.1.26's), so the symbol resolves identically; the address gets recorded whenever an instrumented load test is run. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md) / [compat-5.1.30.md](compat-5.1.30.md) / [compat-5.1.31.md](compat-5.1.31.md).
 
@@ -105,6 +106,8 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | `ssdk_mac_sw_sync_work_start` | `ffffffc0089e19a4` | T |
 
 Note 6.0.5 shifts these addresses (the kernel and `qca-ssdk.ko` were both rebuilt under the Debian 13 / GCC 14 rebase), which is exactly why the module resolves by name at runtime rather than hardcoding addresses. See [compat-6.0.5.md](compat-6.0.5.md).
+
+³ UXG-Fiber, live. All ten addresses are identical to the 6.0.5 table above. See [compat-6.0.10.md](compat-6.0.10.md).
 
 The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 

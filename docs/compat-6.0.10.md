@@ -1,6 +1,6 @@
 # UniFi OS 6.0.10 Compatibility Verification
 
-**Result: compatible.** Static check only, 2026-09-26. Nothing was run on a gateway.
+**Result: compatible.** Static check of the UCG-Fiber image on 2026-09-26. Live check on a production UXG-Fiber on 2026-09-29 ([below](#live-uxg-fiber-2026-09-29)).
 
 | | |
 |---|---|
@@ -11,12 +11,12 @@
 | vermagic | `5.4.213-ui-ipq9574 SMP preempt mod_unload aarch64`, unchanged. No module rebuild. |
 | Baseline | 6.0.9 modules and package list pulled from ATL, 6.0.7 rootfs for configs and units |
 
-| Tweak | Status | Evidence |
+| Tweak | Static (UCG-Fiber image) | Live (UXG-Fiber) |
 |---|---|---|
-| 19 + 20 SGMII+ | ✓ | `qca-ssdk.ko` `.text` byte-identical to 6.0.9 |
-| 06 + 07 MongoDB | ✓ | `mongod` binary, `unifi-mongodb.service`, `/etc/default/unifi` identical to 6.0.7 |
-| 10 journald | ✓ | `journald.conf` and `syslog-ng/` identical to 6.0.7 |
-| 15 fan | ✓ | `ufcd.service` identical to 6.0.7, enabled. `ustd` 6.0.8 → 6.0.9 |
+| 19 + 20 SGMII+ | ✓ `qca-ssdk.ko` `.text` byte-identical to 6.0.9 | ✓ loaded, eth6 2500Mb/s |
+| 06 + 07 MongoDB | ✓ `mongod`, `unifi-mongodb.service`, `/etc/default/unifi` identical to 6.0.7 | n/a (no MongoDB on UXG-Fiber) |
+| 10 journald | ✓ `journald.conf` and `syslog-ng/` identical to 6.0.7 | ✓ in effect |
+| 15 fan | ✓ `ufcd.service` identical to 6.0.7. `ustd` 6.0.8 → 6.0.9 | ✓ re-applied after upgrade reset |
 
 ## qca-ssdk
 
@@ -41,9 +41,24 @@ The loopback ring is host-side EDMA ring and PPE queue plumbing. It does not tou
 
 One package is new: `ubntmdnsd` (mDNS discovery). It runs from `/etc/cron.d/mdns-job` every minute and adds no systemd unit. The unit set is identical to 6.0.7.
 
+## Live: UXG-Fiber, 2026-09-29
+
+Read-only. Nothing was loaded, restarted or re-run. All gateway access fell between 16:15:38 and 16:16:32 UTC.
+
+Build `UXGA6AA.ipq9574.v6.0.10.244feee.260923.1702`, kernel `Wed Sep 23 17:04:31 CST 2026`. Upgraded and booted 2026-09-29 16:11 UTC. `udm-boot` active, `ExecMainStatus=0`. Deployed scripts 10 and 15 are byte-identical to repo HEAD. No `err`-priority entries from any tweak since boot.
+
+**The UXG-Fiber `qca-ssdk.ko` and `qca-nss-dp.ko` are byte-identical to the UCG-Fiber 6.0.10 image** (md5 `9187a544…` and `d3becdb2…`). Earlier rounds always showed a provenance-only md5 difference between the two platforms. 6.0.10 has none, so the static analysis above applies to this box without change.
+
+**19 + 20 SGMII+.** The loaded `force_uniphy1_sgmiiplus.ko` is the repo artifact (`bbd0a2c9…`). The full `dmesg` sequence ran at 16:13:22 UTC: symbols resolved, port bitmap `0x62 -> 0x42`, uniphy1 set to SGMII+ 2.5G, loop restarted, speed cache `1000 -> 2500`. eth6 reports `2500Mb/s` Full, with 1.10 GB rx and 0.94 GB tx and zero errors. All 10 symbols resolve in `/proc/kallsyms` at the same addresses as 6.0.5 on this box ([table](sfp-sgmiiplus.md)).
+
+**10 journald.** `Storage=volatile`, `ForwardToSyslog=no`, `RuntimeMaxUse=40M`, journal 6.7M. The syslog-ng persist file is in `/run`. Active `log` statements route only to console, IDS/IPS, content filtering, ulogd and udapi remote. `auth.log`, `cron.log`, `daemon.log` and `messages` were last written in April.
+
+**15 fan.** The upgrade reset SDB `config.fan` to stock (cpu 100 / rtl8372 109 / rtl8261 103). Script 15 found `ufcd.service`, wrote cpu 65 / rtl8372 85 / rtl8261 90, and restarted `ufcd` at 16:13:33 UTC. A fresh SDB read gives the tuned values, so the `ustd` 6.0.9 `SDBClient` `run`/`get`/`update` API works. The pwm holds at 38, the floor. That is correct, because every component is below its tuned setpoint: CPU 56.2 °C (65), rtl8372 69 °C (85), rtl8261 81 °C (90).
+
 ## Outstanding
 
 - **SGMII+ live load on a UCG-Fiber 6.0.x** (Lab box). Carried over from 6.0.7.
-- The `ustd` 6.0.9 `sdb_client` and `ufcd` binaries changed. Script 15 needs a post-upgrade read of SDB `config.fan` to confirm the tuned setpoints hold.
+- 06 + 07 on a live 6.0.10 UCG-Fiber. The static check found no change from 6.0.9, where both were confirmed live.
+- The `rmmod` path and a link flap were not exercised. eth6 is the production WAN.
 
 Reference `.ko`: `research/qca-ssdk-compare/qca-ssdk-6.0.10.ko`. Working files: `~/fw-6010/` on the NAS.
