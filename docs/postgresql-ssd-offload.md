@@ -151,6 +151,16 @@ ls -lt /data/postgresql/14/apps/data/pg_wal | head -5
 
 Then reboot once and check the same items. The second run takes the "SSD copy is authoritative" path with no copy.
 
+## Firmware Upgrade Safety
+
+Expected behavior, from the script logic. None of these cases is tested yet.
+
+- **UniFi Network upgrades:** The bind mount stays active while the app upgrades, so any schema change goes to the SSD copy.
+- **UniFi OS upgrades:** The overlay resets, but `/data/on_boot.d/`, the marker in `/data/unifi-pg-ssd/` and the SSD copy all persist. On the first boot, the cluster starts on the eMMC copy, then the script binds the SSD copy as on any boot. Writes in that boot window are hidden, as described in [Known costs](#known-costs).
+- **UniFi OS upgrade that changes the cluster:** If the firmware renames `/etc/default/postgresql/14-apps`, moves the data directory, or upgrades the cluster to PostgreSQL 16, the script exits without a bind mount and the cluster runs on the eMMC. A PostgreSQL major upgrade at boot runs before the bind mount, so it would upgrade the old eMMC copy, not the current SSD copy. If release notes mention a PostgreSQL upgrade, run [Reverting](#reverting) before you upgrade.
+- **SSD missing at boot:** The script falls back to the eMMC copy and removes the marker. The next boot with the SSD re-migrates from the eMMC and moves the older SSD copy aside.
+- **Factory reset:** Wipes `/data`, including the marker and the eMMC copy. If the SSD copy survives, the next run finds no marker and moves it aside to a `.stale-` dir before it migrates the new eMMC data. Nothing is overwritten.
+
 ## Reverting
 
 **Follow this order. Do not delete the SSD copy until the Network app works on the eMMC.**

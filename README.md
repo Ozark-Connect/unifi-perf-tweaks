@@ -118,11 +118,12 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sensible default order. You can renumber to fit your existing boot scripts, but **respect the dependency chain:**
 
-- **`05` must come before `06`** - JVM heap tuning edits `/etc/default/unifi`, and `06` is what triggers the unifi restart that picks up the new config. If `06` runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
+- **`05` must come before `06` and `08`** - JVM heap tuning edits `/etc/default/unifi`, and `06` (MongoDB) or `08` (PostgreSQL) is what triggers the unifi restart that picks up the new config. If the offload script runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
 - **`07` must come after `06`** - the backup script depends on the SSD offload being set up.
-- `05`/`06`/`07` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against a stable, bind-mounted, already-restarted environment.
+- **`06`/`07` or `08`, not both.** `06`/`07` apply to UniFi Network up to 10.x (MongoDB). `08` applies to Network 11.0.81 and later (PostgreSQL). See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) for the test setup that disables `06`/`07`.
+- `05`-`08` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against a stable, bind-mounted, already-restarted environment.
 - `10`, `15`, `19`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
-- **If you add your own boot scripts** that touch mongo or unifi (mongodump, API calls, etc.), number them >= `10` so they run after `06` has finished the bind mount and service restart.
+- **If you add your own boot scripts** that touch the database or unifi (mongodump, psql, API calls, etc.), number them >= `10` so they run after `06` or `08` has finished the bind mount and service restart.
 
 ### Model Compatibility
 

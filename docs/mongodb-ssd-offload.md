@@ -4,6 +4,8 @@
 **Compatibility:** UCG models with NVMe SSD (UCG-Fiber, UCG-Max, etc.)
 **Risk level:** Medium - moves database I/O to a different device. Has graceful fallback to eMMC.
 
+> **UniFi Network 11.0.81 and later:** the Network app runs on PostgreSQL, not MongoDB. This script then offloads a MongoDB the app no longer uses, and the live database stays on the eMMC. See [postgresql-ssd-offload.md](postgresql-ssd-offload.md) (experimental) for the PostgreSQL offload and its revert steps.
+
 > **Note on SSD mount paths:** UniFi OS 5.0.x and earlier mount the NVMe SSD at `/volume1`. UniFi OS 5.1.7 EA and newer mount it at `/volume/<uuid>/` instead. The script auto-detects both layouts at runtime, so the examples in this doc use `/volume1` for clarity but will apply to either path on your gateway. If you need to check manually, run `findmnt /dev/md3`.
 
 ## Problem
