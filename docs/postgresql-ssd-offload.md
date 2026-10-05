@@ -48,11 +48,20 @@ The script uses the marker instead:
 | absent | present | The eMMC copy is current. Move the SSD copy aside to `postgresql-14-apps.stale-<timestamp>` and re-migrate. |
 | absent | absent | Migrate from the eMMC copy. |
 | present | SSD mount unavailable | Leave unmounted eMMC operation unchanged, retain authority and warn. |
-| present | SSD mounted but copy invalid/missing | Stop application units and require manual recovery. Do not replace newer data with the eMMC snapshot. |
+| present | SSD mounted but copy invalid/missing | Log an error and change no services. Do not replace newer data with the eMMC snapshot. Manual recovery required. |
 
 Missing-SSD fallback favors availability, like `06`: the exposed eMMC database may be the original offload snapshot. When SSD returns, the next run rebinds the marked SSD copy automatically. Writes made only on eMMC during fallback are hidden, not merged or copied onto SSD; the underlying eMMC directory remains intact. A missing SSD underneath an existing bind is an error, not a live switch to eMMC.
 
-During a first migration, failures before application restart can recover to eMMC, but only after confirmed shutdown, successful unmount (if needed), and durable marker removal. Except for the missing-mount fallback above, authoritative failures or failures after application restart has been attempted retain authority and leave the stack stopped for manual recovery. Previous SSD copies are preserved.
+Failure handling depends on where the run fails. Previous SSD copies are always preserved.
+
+| Failure point | Result |
+|---|---|
+| Before the script stops the stack (layout, readiness, database list, marker checks) | No service changes. Network keeps running on the copy it has. The marker is kept, and the next run retries. |
+| After the stop, during a first migration | Recover to eMMC after a confirmed shutdown, a successful unmount (if needed) and a durable marker removal. |
+| After the stop, with SSD authority | Marker kept, stack left stopped for manual recovery. |
+| After PostgreSQL is verified on the SSD (application start fails) | PostgreSQL stays up on the SSD. Start the applications manually. |
+
+An existing, verified bind exits before any database check. A rerun on an offloaded gateway, for example a Network Optimizer redeploy, never stops services.
 
 **Limit:** this is not a boot interlock and installs no systemd hooks. Firmware may start Network on eMMC before late binding. Lock contention exits without changing services; skipped hooks and power loss can likewise expose stale eMMC data. Do not clear authority merely to get the app running.
 
@@ -62,7 +71,7 @@ During a first migration, failures before application restart can recover to eMM
 - **Boot-window writes can be lost.** Network writes to eMMC before rebinding are hidden afterward; the window depends on firmware boot ordering.
 - **Fallback can expose stale settings/history.** Returning SSD ends fallback on the next successful run and hides fallback-only writes. `09` preserves old archives until the authoritative bind is restored; neither fallback nor rebinding is lossless recovery.
 - **Backups need separate verification.** `07` does not cover PostgreSQL; [09](postgresql-ssd-backup.md) provides daily SSD/weekly eMMC archives. Neither an SSD-local dump nor the old eMMC snapshot is a current off-device backup.
-- **Overall eMMC write reduction is workload-dependent.** Moving PostgreSQL does not move application logs, firmware activity or other eMMC workloads.
+- **Total eMMC writes may not drop.** Moving PostgreSQL does not move application logs, the UniFi OS core cluster (`14/main`), firmware activity or other eMMC workloads. One field measurement (UCG-Fiber, Network 11.0.81, matched ~10.5 h windows) showed no drop in total `mmcblk0` writes after the offload: about 140 MiB/h before and 168 MiB/h after. Attribution of the remaining writes is open.
 
 ## Requirements
 
@@ -148,7 +157,7 @@ ps -o args= -C unifi | tr ' ' '\n' | grep active.db.mode
 ls -lt /data/postgresql/14/apps/data/pg_wal | head -5
 ```
 
-Check that `14/main` is unchanged and Network shows current settings, clients and history. A manual rerun should verify the existing bind/marker without stopping services or copying data.
+Check that `14/main` is unchanged and Network shows current settings, clients and history. A manual rerun verifies the existing bind and marker and exits without stopping services or copying data.
 
 Boot hooks must be **executable**. A non-executable `.sh` may be sourced by the runner, which is unsupported. To retire a hook, archive it outside the boot directory rather than changing its executable bit.
 

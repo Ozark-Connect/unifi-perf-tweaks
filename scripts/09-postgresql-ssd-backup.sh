@@ -238,13 +238,19 @@ if [ "${1:-}" = --emmc ]; then
     log "Compressed eMMC backup published: $EMMC_ARCHIVE."
 fi
 SCRIPT_EOF
+# A failed preflight (status 1: target, authority or lock) still installs the
+# helper and cron. Each helper run repeats the authority check and refuses a
+# stale target, so backups resume by themselves once 08 restores the bind.
+# Skipping the cron instead would leave a gateway with no backups after an
+# OS upgrade resets /etc/cron.d, until someone re-runs this installer.
 NEEDS_BACKUP=false
+PREFLIGHT_FAILED=false
 bash "$HELPER_TMP" --check
 CHECK_STATUS=$?
 case "$CHECK_STATUS" in
     0) ;;
     2) NEEDS_BACKUP=true ;;
-    *) fail "Backup preflight failed; existing helper, cron and archives left unchanged." ;;
+    *) PREFLIGHT_FAILED=true ;;
 esac
 chmod 0700 "$HELPER_TMP" || fail "Cannot make helper executable."
 sync -f "$HELPER_TMP" || fail "Cannot persist backup helper."
@@ -263,6 +269,9 @@ mv -T "$CRON_TMP" "$CRON_FILE" || fail "Cannot install backup cron."
 CRON_TMP=""
 log "Helper and cron installed."
 
+if [ "$PREFLIGHT_FAILED" = true ]; then
+    fail "Backup preflight failed (see the log above). Cron installed; scheduled runs retry the check and skip until it passes."
+fi
 if [ "$NEEDS_BACKUP" = true ]; then
     log "No complete SSD/eMMC backup pair found. Running initial backup."
     "$BACKUP_SCRIPT" --emmc || fail "Initial backup failed; inspect the log before any offload trial."

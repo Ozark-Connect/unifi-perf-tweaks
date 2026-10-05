@@ -22,7 +22,11 @@
 # With no SSD authority marker, failures before application writes on SSD
 # recover to eMMC. An unavailable SSD leaves an unmounted eMMC copy running;
 # when SSD returns, its marked copy is rebound, hiding fallback eMMC writes.
-# Other authoritative failures leave applications stopped for recovery.
+# Failures before the script stops the stack change no services: Network
+# keeps running, the marker is kept, and the next run retries. Failures
+# after the stop, with SSD authority, leave the stack stopped for recovery.
+# An existing, verified bind exits before any database check, so a rerun
+# on an offloaded gateway never stops services.
 #
 # Which copy is current: unlike 06, this script does NOT compare file mtimes.
 # postgresql@14-apps starts on the eMMC copy at every boot, before udm-boot
@@ -169,10 +173,7 @@ recover() {
                 fi
             fi
         elif [ "$SSD_AUTHORITATIVE" = true ]; then
-            for u in $RESTART_UNITS; do
-                systemctl stop "$u" || log "ERROR: Could not stop $u; manual intervention required."
-            done
-            log "ERROR: SSD authority is unresolved. Applications stopped; marker and data retained. Manual recovery required."
+            log "Services left unchanged. SSD authority retained; the next run retries the bind."
         fi
     fi
     if [ -n "$TMP_DIR" ]; then
@@ -210,10 +211,50 @@ PG_CLUSTER_DIR="$DIR"
 PG_DATA="$DIR/data"
 PG_SOCKET_DIR="/var/run/postgresql"
 
-# A mounted copy without a marker is also unsafe to abandon on error.
+# ─── Detect the SSD mount ───
+# Same detection as 06-mongodb-ssd-offload.sh.
+detect_ssd_mount() {
+    if mountpoint -q /volume1 2>/dev/null; then
+        SSD_MOUNT=/volume1
+        return 0
+    fi
+    local d mp
+    for d in /volume/*/; do
+        [ -d "$d" ] || continue
+        mp="${d%/}"
+        if mountpoint -q "$mp" 2>/dev/null; then
+            SSD_MOUNT="$mp"
+            return 0
+        fi
+    done
+    local t
+    t=$(findmnt -no TARGET /dev/md3 2>/dev/null | head -1)
+    if [ -n "$t" ]; then
+        SSD_MOUNT="$t"
+        return 0
+    fi
+    return 1
+}
+
+read_marker_source() {
+    [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || return 1
+    read -r MARKER_TIME MARKER_SOURCE < "$MARKER" || return 1
+    [ -n "$MARKER_TIME" ] && [ -n "$MARKER_SOURCE" ]
+}
+
+# ─── Already offloaded ───
+# Verify the bind and the marker, then exit before the database gate.
+# Network is running on the mounted copy, so a failure here only logs:
+# SSD_AUTHORITATIVE stays as the marker set it and no service is stopped.
 if mountpoint -q "$PG_DATA"; then
-    SSD_AUTHORITATIVE=true
     ALLOW_EMMC_RECOVERY=false
+    detect_ssd_mount || fail "PGDATA is mounted, but no SSD mount was found."
+    SSD_PG_DIR="$SSD_MOUNT/postgresql-$PG_CLUSTER"
+    read_marker_source || fail "PGDATA is mounted, but the authority marker is missing or invalid."
+    [ "$MARKER_SOURCE" = "$SSD_PG_DIR" ] || fail "Marker identifies '$MARKER_SOURCE', expected $SSD_PG_DIR."
+    bind_matches || fail "PGDATA is mounted from an unexpected source."
+    log "Verified SSD bind mount and authority marker. Nothing to do."
+    exit 0
 fi
 
 if [ ! -e "$PG_CLUSTER_DIR/.configured" ] || [ ! -f "$PG_DATA/PG_VERSION" ] || [ -L "$PG_DATA" ]; then
@@ -269,7 +310,7 @@ postmaster_running() {
 # ─── Gate: is the Network app on PostgreSQL, and is the cluster ours alone? ───
 # The database list needs a running cluster. During manual recovery it may
 # still be starting, so wait for it.
-wait_pg || fail "$PG_UNIT not active and accepting connections after ${MAX_WAIT}s."
+wait_pg || fail "$PG_UNIT not active and accepting connections after ${MAX_WAIT}s. PostgreSQL stays on eMMC for now."
 check_pg || fail "Running cluster does not match $PG_DATA."
 
 if ! DATABASES=$(pg_query "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres','template0','template1') ORDER BY 1"); then
@@ -288,35 +329,10 @@ if [ -n "${OTHER_DBS// /}" ]; then
     fail "Cluster $PG_CLUSTER also holds other databases (${OTHER_DBS% }). Shared clusters are not supported."
 fi
 
-# ─── Detect the SSD mount ───
-# Same detection as 06-mongodb-ssd-offload.sh.
-detect_ssd_mount() {
-    if mountpoint -q /volume1 2>/dev/null; then
-        SSD_MOUNT=/volume1
-        return 0
-    fi
-    local d mp
-    for d in /volume/*/; do
-        [ -d "$d" ] || continue
-        mp="${d%/}"
-        if mountpoint -q "$mp" 2>/dev/null; then
-            SSD_MOUNT="$mp"
-            return 0
-        fi
-    done
-    local t
-    t=$(findmnt -no TARGET /dev/md3 2>/dev/null | head -1)
-    if [ -n "$t" ]; then
-        SSD_MOUNT="$t"
-        return 0
-    fi
-    return 1
-}
-
+# ─── Wait for the SSD mount ───
 waited=0
 while ! detect_ssd_mount; do
     if [ "$waited" -ge "$MAX_WAIT" ]; then
-        mountpoint -q "$PG_DATA" && fail "SSD unavailable while PGDATA is mounted; no live fallback attempted."
         if [ "$SSD_AUTHORITATIVE" = true ]; then
             log "WARNING: SSD unavailable after ${MAX_WAIT}s. Leaving Network on potentially stale eMMC data; newer SSD settings/history are unavailable. SSD authority retained: when SSD returns, rebinding will hide writes made on eMMC during fallback. This is availability fallback, not lossless recovery."
         else
@@ -336,14 +352,8 @@ if [ -e "$SSD_PG_DIR" ] && [ ! -d "$SSD_PG_DIR" ]; then
     fail "$SSD_PG_DIR exists but is not a directory."
 fi
 if [ "$SSD_AUTHORITATIVE" = true ]; then
-    [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail "Missing or invalid SSD authority marker."
-    read -r MARKER_TIME MARKER_SOURCE < "$MARKER" || fail "Cannot read SSD authority marker."
-    [ -n "$MARKER_TIME" ] && [ "$MARKER_SOURCE" = "$SSD_PG_DIR" ] || fail "Marker does not identify $SSD_PG_DIR."
-fi
-if mountpoint -q "$PG_DATA"; then
-    bind_matches || fail "PGDATA is mounted from an unexpected source."
-    log "Verified SSD bind mount and authority marker. Nothing to do."
-    exit 0
+    read_marker_source || fail "Missing or invalid SSD authority marker."
+    [ "$MARKER_SOURCE" = "$SSD_PG_DIR" ] || fail "Marker does not identify $SSD_PG_DIR."
 fi
 SSD_DEVICE=$(stat -c %d "$SSD_MOUNT") || fail "Cannot identify SSD filesystem."
 EMMC_DEVICE=$(stat -c %d "$PG_DATA") || fail "Cannot identify eMMC filesystem."
@@ -461,6 +471,8 @@ if ! wait_pg || ! check_pg; then
     fail "PostgreSQL on SSD failed readiness or identity checks."
 fi
 ALLOW_EMMC_RECOVERY=false
-restart_apps || fail "Application restart failed; SSD remains authoritative."
+# PostgreSQL is verified on the SSD. From here, a failed application start
+# must not stop it again: recovery would only add downtime.
 STOPPING=false
+restart_apps || fail "Application restart failed. PostgreSQL stays on the SSD; start ${RESTART_UNITS} manually."
 log "PostgreSQL cluster $PG_CLUSTER started on SSD. Restarted: ${RESTART_UNITS:-none}."

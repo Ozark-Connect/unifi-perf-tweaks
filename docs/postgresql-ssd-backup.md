@@ -61,7 +61,7 @@ ssh root@<gateway-ip> 'install -o root -g root -m 0700 /data/09-postgresql-ssd-b
 /data/unifi-pg-ssd/backup.sh --check
 ```
 
-Check exit status and logs; installed cron is not evidence of a successful backup. Preflight validates the current cluster and authority even when archives already exist, before replacing the helper/cron. An initial dump failure returns nonzero even though the helper/cron have been installed. Re-running the installer retries missing/invalid archives. `--check` returns 0 for a valid target and archive pair, 2 for missing/invalid archives, and 1 for target/authority/lock failures, with explicit logs. Read each archive's `completed-at` to determine its recovery point; the weekly archive can be up to seven days old if every job succeeds.
+Check exit status and logs; installed cron is not evidence of a successful backup. Preflight validates the current cluster and authority even when archives already exist. If preflight fails (target, authority or lock), the installer still installs the helper and cron, skips the initial backup and returns nonzero. Each scheduled run repeats the check and refuses a stale target, so backups resume once `08` restores the bind. An initial dump failure also returns nonzero after the helper/cron are installed. Re-running the installer retries missing/invalid archives. `--check` returns 0 for a valid target and archive pair, 2 for missing/invalid archives, and 1 for target/authority/lock failures, with explicit logs. Read each archive's `completed-at` to determine its recovery point; the weekly archive can be up to seven days old if every job succeeds.
 
 ## Off-device protection and restore
 
