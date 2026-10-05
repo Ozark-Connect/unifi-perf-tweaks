@@ -81,23 +81,9 @@ Require physical recovery access, a downloaded Console backup, a verified [off-d
 
 ### Retiring the MongoDB hooks
 
-After confirming PostgreSQL mode, no MongoDB process and no running Mongo backup, archive `06`, `07` and the cron outside active paths. Changing executable bits is insufficient: the boot runner can source non-executable `.sh` files. Preserve all Mongo data, backups and the generated backup helper.
+Moving `06` and `07` aside is not enough. While `06` is active, the current MongoDB data is on the SSD, and the eMMC copy under the bind mount is the snapshot from the first migration (5 months old on one production gateway). After the next reboot, the Network app's on-demand `mongod`, or a downgrade to Network 10.x, would find that old snapshot.
 
-```bash
-bash <<'EOF'
-set -e
-ARCHIVE="/data/on_boot.d.disabled/mongodb-$(date +%Y%m%d%H%M%S)-$$"
-mkdir -p "$ARCHIVE"
-mv /data/on_boot.d/06-mongodb-ssd-offload.sh /data/on_boot.d/07-mongodb-ssd-backup.sh "$ARCHIVE/"
-if [ -f /etc/cron.d/mongodb-ssd-backup ]; then
-    mv /etc/cron.d/mongodb-ssd-backup "$ARCHIVE/"
-fi
-printf 'Hooks archived in %s; data, helper and current bind mount retained.\n' "$ARCHIVE"
-EOF
-```
-
-No service stop, unmount or copy-back is needed for this retirement. Restore the archived files to their original paths to undo it; do not do so alongside `08`. Archiving hooks is different from a management application's Remove operation, which may unmount or copy Mongo data. Do not reinstall retired Mongo hooks while using PostgreSQL offload.
-
+Use [`scripts/maintenance/mongodb-ssd-decommission.sh`](../scripts/maintenance/mongodb-ssd-decommission.sh) `--decommission`. It confirms the PostgreSQL backend, puts the newest MongoDB copy back on the eMMC, retires the hooks, cron and helper, restarts Network and deletes the SSD copies. See [mongodb-ssd-offload.md](mongodb-ssd-offload.md#decommissioning-after-the-postgresql-migration). Run it before you install `08`. Both stop `unifi.service`, so never run them at the same time.
 ### Check the layout
 
 Confirm the database, space, SSD mount and service dependencies before installation:

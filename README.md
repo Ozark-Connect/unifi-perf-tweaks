@@ -223,7 +223,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [journald-volatile.md](docs/journald-volatile.md) - trade-offs, verification, reverting
 - [jvm-heap-tuning.md](docs/jvm-heap-tuning.md) - GC profiling data, why MaxHeapFree does nothing
 - [fan-control-tuning.md](docs/fan-control-tuning.md) - PID controller explained, per-model setup
-- [mongodb-ssd-offload.md](docs/mongodb-ssd-offload.md) - migration, firmware upgrade safety
+- [mongodb-ssd-offload.md](docs/mongodb-ssd-offload.md) - migration, firmware upgrade safety, decommissioning after the PostgreSQL migration
 - [mongodb-ssd-backup.md](docs/mongodb-ssd-backup.md) - backup schedule, failover strategy
 - [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - PostgreSQL SSD offload, installation, upgrade behavior and recovery
 - [postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md) - PostgreSQL backup schedule, globals coverage and off-device restore
