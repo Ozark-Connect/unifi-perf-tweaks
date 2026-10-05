@@ -2,8 +2,8 @@
 # 08-postgresql-ssd-offload.sh: Bind-mount the UniFi Network PostgreSQL data
 # directory from the NVMe SSD to move its writes off the eMMC
 #
-# EXPERIMENTAL. Not yet verified on a gateway. See
-# docs/postgresql-ssd-offload.md before deploying.
+# Late boot binding and availability-first missing-SSD fallback can expose
+# stale eMMC data. See docs/postgresql-ssd-offload.md for recovery.
 #
 # UniFi Network 11.0.81+ migrates from MongoDB to PostgreSQL. The database
 # lives in the UniFi OS "apps" PostgreSQL cluster (port 5434), defined in
@@ -18,12 +18,11 @@
 # .configured or any conf file is missing, so a bind mount over the whole
 # cluster dir that came up without those files would wipe the SSD copy.
 #
-# This is the PostgreSQL counterpart of 06-mongodb-ssd-offload.sh. It does
-# nothing until the Network app is on PostgreSQL (no "unifi-network" database
-# in the apps cluster), so it is safe to deploy ahead of the migration.
-#
-# Falls back to the eMMC if the SSD is missing or PostgreSQL fails to start
-# on the SSD copy.
+# This is the PostgreSQL counterpart of 06-mongodb-ssd-offload.sh.
+# With no SSD authority marker, failures before application writes on SSD
+# recover to eMMC. An unavailable SSD leaves an unmounted eMMC copy running;
+# when SSD returns, its marked copy is rebound, hiding fallback eMMC writes.
+# Other authoritative failures leave applications stopped for recovery.
 #
 # Which copy is current: unlike 06, this script does NOT compare file mtimes.
 # postgresql@14-apps starts on the eMMC copy at every boot, before udm-boot
@@ -31,9 +30,8 @@
 # the eMMC copy always looks newer, and an mtime check would overwrite the
 # SSD data with the eMMC snapshot on every reboot. Instead, a marker file
 # ($MARKER) records that the SSD copy is authoritative:
-#   - Written after every successful bind mount.
-#   - Removed on every path where PostgreSQL stays on the eMMC for this boot,
-#     because the eMMC copy then takes real writes.
+#   - Persisted before starting PostgreSQL on the SSD copy.
+#   - Removed only on checked first-migration rollback or explicit revert.
 #   - Marker present + SSD copy present: bind the SSD copy, no copy.
 #   - Marker absent + SSD copy present: the eMMC copy is current. Move the
 #     SSD copy aside (never deleted) and re-migrate.
@@ -44,6 +42,7 @@ NETWORK_DB="unifi-network"           # Network app database; its presence gates 
 MAX_WAIT=60                          # Seconds to wait for the SSD mount and for PostgreSQL
 STATE_DIR="/data/unifi-pg-ssd"       # eMMC, outside the Ubiquiti-managed /data/postgresql tree
 MARKER="$STATE_DIR/$PG_CLUSTER.ssd-active"
+PG_UNIT="postgresql@$PG_CLUSTER.service"
 
 LOG_TAG="postgresql-ssd-offload"
 
@@ -52,14 +51,24 @@ log() {
     logger -t "$LOG_TAG" "$1"
 }
 
-# PostgreSQL stays on the eMMC for this boot, so the eMMC copy becomes the
-# current one. The next boot with the SSD must re-migrate.
-clear_marker() {
-    if [ -e "$MARKER" ]; then
-        rm -f "$MARKER"
-        log "eMMC copy is now authoritative. The next successful run re-migrates it to the SSD."
-    fi
+fail() {
+    log "ERROR: $1"
+    exit 1
 }
+
+clear_marker() {
+    rm -f -- "$MARKER" && sync -f "$STATE_DIR"
+}
+
+if [ "$#" -ne 0 ]; then
+    fail "No arguments are supported (including --dry-run). Nothing changed."
+fi
+if [ "$EUID" -ne 0 ]; then
+    fail "Run as root."
+fi
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    fail "Execute this script with Bash; do not source it. Boot hooks must be executable."
+fi
 
 # ─── Model check ───
 # Same rule as 06-mongodb-ssd-offload.sh: UCG-Fiber and UCG-Max only. See
@@ -78,54 +87,173 @@ case "$(echo "$SHORTNAME" | tr '[:upper:]' '[:lower:]')" in
         ;;
 esac
 
+command -v flock >/dev/null || fail "Required command not found: flock."
+exec 9>/run/postgresql-ssd-offload.lock || fail "Cannot open the run lock."
+flock -n 9 || fail "Another database operation holds the lock. No services changed; retry manually after it finishes. This is not a boot interlock."
+
+SSD_AUTHORITATIVE=false
+if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    SSD_AUTHORITATIVE=true
+fi
+STOPPING=false
+ALLOW_EMMC_RECOVERY=true
+if [ "$SSD_AUTHORITATIVE" = true ]; then
+    ALLOW_EMMC_RECOVERY=false
+fi
+RESTART_UNITS="unifi.service"
+TMP_DIR=""
+MARKER_TMP=""
+MOUNT_ATTEMPTED=false
+
+wait_postmaster_exit() {
+    local waited=0
+    while postmaster_running; do
+        [ "$waited" -lt 30 ] || return 1
+        sleep 1
+        waited=$((waited + 1))
+    done
+    case "$(systemctl is-active "$PG_UNIT")" in
+        inactive|failed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+stop_stack() {
+    local u
+    for u in $RESTART_UNITS; do
+        systemctl stop "$u" || return 1
+    done
+    systemctl stop "$PG_UNIT" && wait_postmaster_exit
+}
+
+bind_matches() {
+    local source target
+    mountpoint -q "$PG_DATA" || return 1
+    source=$(stat -c '%d:%i' "$SSD_PG_DIR") || return 1
+    target=$(stat -c '%d:%i' "$PG_DATA") || return 1
+    [ "$source" = "$target" ]
+}
+
+restart_apps() {
+    local u
+    for u in $RESTART_UNITS; do
+        systemctl start "$u" || return 1
+        systemctl is-active --quiet "$u" || return 1
+    done
+}
+
+recover() {
+    local status=$?
+    trap - EXIT
+    trap '' INT TERM
+    if [ "$status" -ne 0 ]; then
+        if [ "$STOPPING" = true ]; then
+            log "Recovering after a failed or interrupted offload."
+            if ! stop_stack; then
+                log "ERROR: Cannot confirm the stack stopped. No unmount or restart attempted; manual recovery required."
+                ALLOW_EMMC_RECOVERY=false
+            elif [ "$ALLOW_EMMC_RECOVERY" = false ]; then
+                log "ERROR: SSD authority retained; stack left stopped. Do not start stale eMMC data. Manual recovery required."
+            elif [ "$MOUNT_ATTEMPTED" = true ] && mountpoint -q "$PG_DATA"; then
+                if ! bind_matches || ! umount "$PG_DATA"; then
+                    log "ERROR: Cannot safely unmount PGDATA. Marker retained; stack left stopped. Manual recovery required."
+                    ALLOW_EMMC_RECOVERY=false
+                fi
+            fi
+            if [ "$ALLOW_EMMC_RECOVERY" = true ]; then
+                if clear_marker && systemctl start "$PG_UNIT" && wait_pg && check_pg && restart_apps; then
+                    log "First-migration rollback complete. PostgreSQL and applications are back on eMMC."
+                else
+                    log "ERROR: eMMC recovery failed. Stopping the stack; manual recovery required."
+                    stop_stack || log "ERROR: Could not confirm the recovery stack stopped."
+                fi
+            fi
+        elif [ "$SSD_AUTHORITATIVE" = true ]; then
+            for u in $RESTART_UNITS; do
+                systemctl stop "$u" || log "ERROR: Could not stop $u; manual intervention required."
+            done
+            log "ERROR: SSD authority is unresolved. Applications stopped; marker and data retained. Manual recovery required."
+        fi
+    fi
+    if [ -n "$TMP_DIR" ]; then
+        rm -rf -- "$TMP_DIR" || log "ERROR: Could not remove temporary copy $TMP_DIR."
+    fi
+    if [ -n "$MARKER_TMP" ]; then
+        rm -f -- "$MARKER_TMP" || log "ERROR: Could not remove temporary marker $MARKER_TMP."
+    fi
+    exit "$status"
+}
+trap recover EXIT
+trap 'fail "Interrupted."' INT TERM
+
+for command in sync mktemp mountpoint findmnt pg_isready runuser psql timeout; do
+    command -v "$command" >/dev/null || fail "Required command not found: $command."
+done
+
 # ─── Cluster layout ───
 # Read the cluster definition the firmware ships, instead of hardcoding
 # paths, so a firmware change to the layout fails closed below.
 PG_ENV="/etc/default/postgresql/$PG_CLUSTER"
 if [ ! -r "$PG_ENV" ]; then
+    [ "$SSD_AUTHORITATIVE" = false ] || fail "$PG_ENV missing while SSD is authoritative."
     log "Not running: $PG_ENV not found. This firmware has no $PG_CLUSTER PostgreSQL cluster."
     exit 0
 fi
 # shellcheck disable=SC1090
-. "$PG_ENV"
+. "$PG_ENV" || fail "Cannot read $PG_ENV."
 
-if [ -z "$PG_VERSION" ] || [ -z "$CLUSTER_NAME" ] || [ -z "$DIR" ] || [ -z "$CLUSTER_PORT" ]; then
-    log "ERROR: $PG_ENV is missing PG_VERSION, CLUSTER_NAME, DIR or CLUSTER_PORT. Aborting."
-    exit 1
+if [ "${PG_VERSION:-}" != 14 ] || [ "${CLUSTER_NAME:-}" != apps ] || \
+   [ "${DIR:-}" != /data/postgresql/14/apps ] || [ "${CLUSTER_PORT:-}" != 5434 ]; then
+    fail "Unexpected $PG_ENV layout. Only PostgreSQL 14/apps at port 5434 is supported."
 fi
-PG_UNIT="postgresql@${PG_VERSION}-${CLUSTER_NAME}.service"
 PG_CLUSTER_DIR="$DIR"
 PG_DATA="$DIR/data"
 PG_SOCKET_DIR="/var/run/postgresql"
 
-# Check if already bind-mounted. Stock PGDATA is a subdir of /data, not
-# its own mount point.
-if mountpoint -q "$PG_DATA" 2>/dev/null; then
-    log "Already bind-mounted to SSD. Nothing to do."
-    exit 0
+# A mounted copy without a marker is also unsafe to abandon on error.
+if mountpoint -q "$PG_DATA"; then
+    SSD_AUTHORITATIVE=true
+    ALLOW_EMMC_RECOVERY=false
 fi
 
-if [ ! -e "$PG_CLUSTER_DIR/.configured" ] || [ ! -f "$PG_DATA/PG_VERSION" ]; then
+if [ ! -e "$PG_CLUSTER_DIR/.configured" ] || [ ! -f "$PG_DATA/PG_VERSION" ] || [ -L "$PG_DATA" ]; then
+    [ "$SSD_AUTHORITATIVE" = false ] || fail "Authoritative cluster is not initialized at $PG_CLUSTER_DIR."
     log "Not running: cluster $PG_CLUSTER is not initialized at $PG_CLUSTER_DIR. Nothing to offload."
-    clear_marker
     exit 0
 fi
+[ "$(cat "$PG_DATA/PG_VERSION")" = "$PG_VERSION" ] || fail "PGDATA version does not match $PG_VERSION."
 
 # The config must point PostgreSQL at the PGDATA we are about to bind-mount.
 CONF_DATA_DIR=$(sed -n "s/^[[:space:]]*data_directory[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
     "$PG_CLUSTER_DIR/conf/postgresql.conf" 2>/dev/null | tail -1)
 if [ "$CONF_DATA_DIR" != "$PG_DATA" ]; then
-    log "ERROR: postgresql.conf data_directory is '${CONF_DATA_DIR:-unset}', expected '$PG_DATA'. Unexpected layout. Aborting."
-    clear_marker
-    exit 1
+    fail "postgresql.conf data_directory is '${CONF_DATA_DIR:-unset}', expected '$PG_DATA'."
 fi
 
 pg_ready() {
-    pg_isready -q -h "$PG_SOCKET_DIR" -p "$CLUSTER_PORT" >/dev/null 2>&1
+    timeout --kill-after=2s 2s pg_isready -t 1 -q -h "$PG_SOCKET_DIR" -p "$CLUSTER_PORT" >/dev/null 2>&1
 }
 
 pg_query() {
-    runuser -u postgres -- psql -X -w -h "$PG_SOCKET_DIR" -p "$CLUSTER_PORT" -d postgres -Atc "$1" 2>/dev/null
+    timeout --kill-after=2s 15s runuser -u postgres -- psql -X -w -v ON_ERROR_STOP=1 -h "$PG_SOCKET_DIR" -p "$CLUSTER_PORT" -d postgres -Atc "$1"
+}
+
+wait_pg() {
+    local waited=0
+    local deadline=$((SECONDS + MAX_WAIT))
+    # The socket can accept connections before the forking unit becomes active.
+    until pg_ready && systemctl is-active --quiet "$PG_UNIT"; do
+        [ "$waited" -lt "$MAX_WAIT" ] && [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
+check_pg() {
+    local data
+    systemctl is-active --quiet "$PG_UNIT" || return 1
+    data=$(pg_query "SHOW data_directory") || return 1
+    [ "$data" = "$PG_DATA" ]
 }
 
 # A postmaster for this PGDATA is running if postmaster.pid exists and its
@@ -133,32 +261,23 @@ pg_query() {
 postmaster_running() {
     local pid
     [ -f "$PG_DATA/postmaster.pid" ] || return 1
-    pid=$(head -1 "$PG_DATA/postmaster.pid" 2>/dev/null)
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+    pid=$(head -1 "$PG_DATA/postmaster.pid") || return 0
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+    kill -0 "$pid" 2>/dev/null
 }
 
 # ─── Gate: is the Network app on PostgreSQL, and is the cluster ours alone? ───
-# The database list needs a running cluster. At boot the cluster may still
-# be starting, so wait for it.
-waited=0
-while ! pg_ready; do
-    if [ "$waited" -ge "$MAX_WAIT" ]; then
-        log "Not running: $PG_UNIT not accepting connections after ${MAX_WAIT}s. Leaving PostgreSQL on eMMC."
-        clear_marker
-        exit 0
-    fi
-    sleep 2
-    waited=$((waited + 2))
-done
+# The database list needs a running cluster. During manual recovery it may
+# still be starting, so wait for it.
+wait_pg || fail "$PG_UNIT not active and accepting connections after ${MAX_WAIT}s."
+check_pg || fail "Running cluster does not match $PG_DATA."
 
 if ! DATABASES=$(pg_query "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres','template0','template1') ORDER BY 1"); then
-    log "ERROR: could not list databases in cluster $PG_CLUSTER. Leaving PostgreSQL on eMMC."
-    clear_marker
-    exit 1
+    fail "Could not list databases in cluster $PG_CLUSTER."
 fi
 if ! echo "$DATABASES" | grep -qx "$NETWORK_DB"; then
+    [ "$SSD_AUTHORITATIVE" = false ] || fail "Authoritative cluster no longer contains '$NETWORK_DB'."
     log "Not running: no '$NETWORK_DB' database in cluster $PG_CLUSTER. The Network app is not on PostgreSQL yet."
-    clear_marker
     exit 0
 fi
 # The apps cluster is named for sharing. Stopping it interrupts every app
@@ -166,9 +285,7 @@ fi
 # stack. Refuse if any other database is present.
 OTHER_DBS=$(echo "$DATABASES" | grep -vx "$NETWORK_DB" | tr '\n' ' ')
 if [ -n "${OTHER_DBS// /}" ]; then
-    log "Not running: cluster $PG_CLUSTER also holds other databases (${OTHER_DBS% }). Shared clusters are not supported yet."
-    clear_marker
-    exit 0
+    fail "Cluster $PG_CLUSTER also holds other databases (${OTHER_DBS% }). Shared clusters are not supported."
 fi
 
 # ─── Detect the SSD mount ───
@@ -199,8 +316,12 @@ detect_ssd_mount() {
 waited=0
 while ! detect_ssd_mount; do
     if [ "$waited" -ge "$MAX_WAIT" ]; then
-        log "WARNING: No SSD mount (/volume1 or /volume/<uuid>) found after ${MAX_WAIT}s. Falling back to eMMC."
-        clear_marker
+        mountpoint -q "$PG_DATA" && fail "SSD unavailable while PGDATA is mounted; no live fallback attempted."
+        if [ "$SSD_AUTHORITATIVE" = true ]; then
+            log "WARNING: SSD unavailable after ${MAX_WAIT}s. Leaving Network on potentially stale eMMC data; newer SSD settings/history are unavailable. SSD authority retained: when SSD returns, rebinding will hide writes made on eMMC during fallback. This is availability fallback, not lossless recovery."
+        else
+            log "WARNING: No SSD mount found after ${MAX_WAIT}s. Initial migration skipped; PostgreSQL remains on eMMC."
+        fi
         exit 0
     fi
     sleep 2
@@ -210,24 +331,56 @@ done
 SSD_PG_DIR="$SSD_MOUNT/postgresql-$PG_CLUSTER"
 log "SSD mount: $SSD_MOUNT"
 
+[ ! -L "$SSD_PG_DIR" ] || fail "SSD PGDATA must not be a symlink."
+if [ -e "$SSD_PG_DIR" ] && [ ! -d "$SSD_PG_DIR" ]; then
+    fail "$SSD_PG_DIR exists but is not a directory."
+fi
+if [ "$SSD_AUTHORITATIVE" = true ]; then
+    [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail "Missing or invalid SSD authority marker."
+    read -r MARKER_TIME MARKER_SOURCE < "$MARKER" || fail "Cannot read SSD authority marker."
+    [ -n "$MARKER_TIME" ] && [ "$MARKER_SOURCE" = "$SSD_PG_DIR" ] || fail "Marker does not identify $SSD_PG_DIR."
+fi
+if mountpoint -q "$PG_DATA"; then
+    bind_matches || fail "PGDATA is mounted from an unexpected source."
+    log "Verified SSD bind mount and authority marker. Nothing to do."
+    exit 0
+fi
+SSD_DEVICE=$(stat -c %d "$SSD_MOUNT") || fail "Cannot identify SSD filesystem."
+EMMC_DEVICE=$(stat -c %d "$PG_DATA") || fail "Cannot identify eMMC filesystem."
+[ "$SSD_DEVICE" != "$EMMC_DEVICE" ] || fail "SSD and eMMC are on the same filesystem."
+
 # ─── Which copy is current ───
 # See the header: decided by the marker, not by mtimes.
 if [ -f "$SSD_PG_DIR/global/pg_control" ]; then
-    if [ -e "$MARKER" ]; then
+    if [ "$SSD_AUTHORITATIVE" = true ]; then
         log "SSD copy is authoritative. Setting up bind mount."
         NEEDS_MIGRATION=false
     else
-        log "SSD copy found, but the eMMC copy is authoritative (fallback or revert since the last bind). Will re-migrate."
+        log "SSD copy found without a marker. Will preserve it and migrate the current eMMC copy."
         NEEDS_MIGRATION=true
     fi
 else
-    if [ -e "$MARKER" ]; then
-        log "WARNING: marker says the SSD copy is authoritative, but $SSD_PG_DIR has no data. Re-migrating from the eMMC snapshot. Changes since the last migration are lost."
-    else
-        log "No SSD copy found. Will perform initial migration."
-    fi
+    [ "$SSD_AUTHORITATIVE" = false ] || fail "Authoritative SSD copy has no global/pg_control."
+    log "No SSD copy found. Will perform initial migration."
     NEEDS_MIGRATION=true
 fi
+
+COPY_SOURCE="$PG_DATA"
+if [ "$NEEDS_MIGRATION" = false ]; then
+    COPY_SOURCE="$SSD_PG_DIR"
+fi
+[ "$(cat "$COPY_SOURCE/PG_VERSION")" = "$PG_VERSION" ] || fail "Selected copy is not PostgreSQL $PG_VERSION."
+LINKS=$(find "$COPY_SOURCE" -type l -print -quit) || fail "Cannot inspect selected PGDATA."
+[ -z "$LINKS" ] || fail "PGDATA symlinks (including external WAL/tablespaces) are unsupported: $LINKS."
+if [ "$NEEDS_MIGRATION" = true ]; then
+    SIZE=$(du -sk "$PG_DATA") || fail "Cannot measure PGDATA."
+    read -r REQUIRED_KB _ <<< "$SIZE"
+    SPACE=$(df -Pk "$SSD_MOUNT") || fail "Cannot measure SSD free space."
+    AVAILABLE_KB=$(echo "$SPACE" | awk 'NR==2 {print $4}')
+    [[ "$REQUIRED_KB" =~ ^[0-9]+$ && "$AVAILABLE_KB" =~ ^[0-9]+$ ]] || fail "Invalid disk-space measurements."
+    [ "$AVAILABLE_KB" -ge "$REQUIRED_KB" ] || fail "Insufficient SSD space for a new PGDATA copy."
+fi
+mkdir -p "$STATE_DIR" || fail "Cannot create $STATE_DIR."
 
 # ─── Stop the stack ───
 # Record the running units that depend on the cluster, so the same set
@@ -238,40 +391,24 @@ fi
 # boot it is often still "activating" (Type=notify), which is-active --quiet
 # reports as not running. For the same reason, "activating" counts as
 # running for the other dependents.
-DEPENDENTS=$(systemctl list-dependencies --reverse --plain --no-legend "$PG_UNIT" 2>/dev/null \
-    | sed 's/^[[:space:]]*//' | grep '\.service$' | grep -v '^postgresql' | grep -vx 'unifi.service' | sort -u)
+DEPENDENCY_LIST=$(systemctl list-dependencies --reverse --plain --no-legend "$PG_UNIT") || fail "Cannot list cluster dependents."
+DEPENDENTS=$(echo "$DEPENDENCY_LIST" | sed 's/^[[:space:]]*//' | grep '\.service$' \
+    | grep -v '^postgresql' | grep -vx 'unifi.service' | sort -u)
 RESTART_UNITS="unifi.service"
 for u in $DEPENDENTS; do
     case "$(systemctl is-active "$u" 2>/dev/null)" in
         active|activating|reloading) RESTART_UNITS="$RESTART_UNITS $u" ;;
+        inactive|failed) ;;
+        *) fail "Cannot establish the state of dependent $u." ;;
     esac
 done
-
-restart_stack() {
-    systemctl start "$PG_UNIT"
-    local u
-    for u in $RESTART_UNITS; do
-        systemctl start "$u"
-    done
-}
 
 # Stop the Network app first so it closes its connections, then stop the
 # cluster. The postgresql@ unit stops with `pg_ctlcluster -m fast`, which
 # is a clean shutdown (shutdown checkpoint, no crash recovery on start).
 log "Stopping unifi.service and $PG_UNIT (restart list: ${RESTART_UNITS:-none})..."
-systemctl stop unifi.service
-systemctl stop "$PG_UNIT"
-
-for i in $(seq 1 30); do
-    postmaster_running || break
-    sleep 1
-done
-if postmaster_running; then
-    log "ERROR: PostgreSQL still running on $PG_DATA after stop. Aborting to avoid corruption."
-    clear_marker
-    restart_stack
-    exit 1
-fi
+STOPPING=true
+stop_stack || fail "Cannot confirm the stack stopped. No data movement attempted."
 
 # ─── Migration ───
 # Copy to a temp dir and rename on success, so a partial copy can never be
@@ -280,76 +417,50 @@ fi
 # behind) or deleted (it may hold the only copy of recent changes if the
 # marker logic guessed wrong).
 if [ "$NEEDS_MIGRATION" = true ]; then
-    TMP_DIR="$SSD_PG_DIR.tmp"
-    rm -rf "$TMP_DIR"
-    mkdir -p "$TMP_DIR"
+    TMP_DIR=$(mktemp -d "$SSD_PG_DIR.tmp.XXXXXX") || fail "Cannot create temporary SSD copy."
     log "Copying $PG_DATA to $SSD_PG_DIR..."
-    if ! cp -a "$PG_DATA"/. "$TMP_DIR"/; then
-        log "ERROR: Copy to SSD failed. Leaving PostgreSQL on eMMC."
-        rm -rf "$TMP_DIR"
-        clear_marker
-        restart_stack
-        exit 1
-    fi
+    cp -a "$PG_DATA"/. "$TMP_DIR"/ || fail "Copy to SSD failed."
+    sync -f "$TMP_DIR" || fail "Cannot persist SSD copy."
     if [ -d "$SSD_PG_DIR" ]; then
-        STALE_DIR="$SSD_PG_DIR.stale-$(date +%Y%m%d%H%M%S)"
-        mv "$SSD_PG_DIR" "$STALE_DIR"
+        STALE_DIR="$SSD_PG_DIR.stale-$(date +%Y%m%d%H%M%S)-$$"
+        [ ! -e "$STALE_DIR" ] && [ ! -L "$STALE_DIR" ] || fail "Archive destination already exists: $STALE_DIR."
+        mv -T "$SSD_PG_DIR" "$STALE_DIR" || fail "Cannot archive previous SSD copy."
         log "Moved previous SSD copy aside to $STALE_DIR."
     fi
-    mv "$TMP_DIR" "$SSD_PG_DIR"
+    mv -T "$TMP_DIR" "$SSD_PG_DIR" || fail "Cannot promote temporary SSD copy."
+    TMP_DIR=""
     log "Migration complete. $(du -sh "$SSD_PG_DIR" | cut -f1) copied."
 fi
 
 # PostgreSQL refuses to start unless PGDATA is owned by the server user
 # with mode 0700 or 0750. A bind mount shows the source dir's own owner and
-# mode, so set them on the SSD dir. Re-applied every boot in case the dir
-# was recreated.
-chown postgres:postgres "$SSD_PG_DIR"
-chmod 0700 "$SSD_PG_DIR"
+# mode, so set them on the SSD dir before binding.
+chown postgres:postgres "$SSD_PG_DIR" || fail "Cannot set SSD PGDATA owner."
+chmod 0700 "$SSD_PG_DIR" || fail "Cannot set SSD PGDATA mode."
+sync -f "$SSD_PG_DIR" || fail "Cannot persist SSD directory."
 
 # ─── Bind mount ───
-mount --bind "$SSD_PG_DIR" "$PG_DATA"
-
-if ! mountpoint -q "$PG_DATA" 2>/dev/null; then
-    log "ERROR: Bind mount failed. PostgreSQL will use eMMC."
-    clear_marker
-    restart_stack
-    exit 1
-fi
+MOUNT_ATTEMPTED=true
+mount --bind "$SSD_PG_DIR" "$PG_DATA" || fail "Bind mount failed."
+bind_matches || fail "Bind mount source verification failed."
 log "Bind mount active: $PG_DATA -> $SSD_PG_DIR (SSD)"
 
-# ─── Start on the SSD, fall back to eMMC if it does not come up ───
-systemctl start "$PG_UNIT"
-waited=0
-while ! pg_ready; do
-    if [ "$waited" -ge "$MAX_WAIT" ]; then
-        break
-    fi
-    sleep 2
-    waited=$((waited + 2))
-done
-
-if ! pg_ready; then
-    log "ERROR: PostgreSQL did not start on the SSD copy within ${MAX_WAIT}s. Falling back to eMMC."
-    systemctl stop "$PG_UNIT"
-    for i in $(seq 1 30); do
-        postmaster_running || break
-        sleep 1
-    done
-    if ! umount "$PG_DATA"; then
-        log "ERROR: umount $PG_DATA failed. Not restarting PostgreSQL. Manual recovery needed (see docs/postgresql-ssd-offload.md)."
-        exit 1
-    fi
-    clear_marker
-    restart_stack
-    exit 1
+# Publish authority before PostgreSQL or applications can write on SSD.
+if [ "$SSD_AUTHORITATIVE" = false ]; then
+    MARKER_TMP=$(mktemp "$STATE_DIR/$PG_CLUSTER.ssd-active.tmp.XXXXXX") || fail "Cannot create temporary authority marker."
+    printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$SSD_PG_DIR" > "$MARKER_TMP" || fail "Cannot write authority marker."
+    sync -f "$MARKER_TMP" || fail "Cannot persist temporary authority marker."
+    mv -T "$MARKER_TMP" "$MARKER" || fail "Cannot publish authority marker."
+    MARKER_TMP=""
+    sync -f "$STATE_DIR" || fail "Cannot persist authority marker rename."
 fi
 
-# The SSD copy is live and takes the writes from here on.
-mkdir -p "$STATE_DIR"
-echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $SSD_PG_DIR" > "$MARKER"
-
-for u in $RESTART_UNITS; do
-    systemctl start "$u"
-done
+# ─── Start on the SSD ───
+systemctl start "$PG_UNIT" || fail "PostgreSQL start on SSD failed."
+if ! wait_pg || ! check_pg; then
+    fail "PostgreSQL on SSD failed readiness or identity checks."
+fi
+ALLOW_EMMC_RECOVERY=false
+restart_apps || fail "Application restart failed; SSD remains authoritative."
+STOPPING=false
 log "PostgreSQL cluster $PG_CLUSTER started on SSD. Restarted: ${RESTART_UNITS:-none}."

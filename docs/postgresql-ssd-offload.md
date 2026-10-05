@@ -1,22 +1,14 @@
-# postgresql-ssd-offload (EXPERIMENTAL)
+# postgresql-ssd-offload
 
 **Script:** [`scripts/08-postgresql-ssd-offload.sh`](../scripts/08-postgresql-ssd-offload.sh)
-**Compatibility:** UCG-Fiber and UCG-Max with UniFi Network 11.0.81 or later (PostgreSQL mode)
-**Status:** **Experimental. Not yet run on a gateway.** Written from a tester's read-only findings on a UCG-Fiber running Network 11.0.81 ([NetworkOptimizer#1251](https://github.com/Ozark-Connect/NetworkOptimizer/issues/1251)) and from the PostgreSQL units in the UniFi OS 6.0.10 rootfs. Deploy only on a gateway you can factory reset, with a fresh console backup downloaded.
-**Risk level:** Medium-high until verified. Moves the Network app database to a different device and stops the Network app at every boot.
+**Compatibility:** UCG-Fiber/UCG-Max with NVMe SSD, PostgreSQL `14/apps`, port **5434**, UniFi Network in PostgreSQL mode. UCG-Max has not been hardware-verified.
+**Risk level:** Medium - moves database I/O to a different device. Missing-SSD fallback may use stale eMMC data; it is not lossless recovery.
 
 This is the PostgreSQL counterpart of [mongodb-ssd-offload](mongodb-ssd-offload.md). Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06-mongodb-ssd-offload.sh` no longer covers the live database.
 
-## What changed in Network 11.0.81
+## Supported layout
 
-The tester observed this on a UCG-Fiber after the upgrade:
-
-- The Network app runs with `-Dunifi.active.db.mode=postgresql`.
-- The database is `unifi-network` in a PostgreSQL 14 cluster on port **5434**. `SHOW data_directory` returns `/data/postgresql/14/apps/data`, which is on the eMMC.
-- `unifi-mongodb.service` is inactive. Nothing listens on 27117.
-- `06` and `07` are still in `/data/on_boot.d/`, and the stock `external-disk.conf` drop-in on `unifi-mongodb.service` is still present.
-
-The cluster is not new in 11.0.81. UniFi OS 6.0.10 already ships its definition:
+Network must run in PostgreSQL mode (`-Dunifi.active.db.mode=postgresql`). The supported cluster layout is:
 
 | Item | Value |
 |---|---|
@@ -31,14 +23,14 @@ The UniFi OS core cluster (`14-main`, port 5432, `unifi-core`) is a separate clu
 ## What the script does
 
 1. Model check: UCG-Fiber and UCG-Max only (same rule as `06`).
-2. Reads `/etc/default/postgresql/14-apps` and checks that `postgresql.conf` points `data_directory` at `$DIR/data`. Any other layout aborts.
-3. Waits for the cluster to accept connections, then lists its databases. It exits without changes if `unifi-network` is absent (Network app not on PostgreSQL yet), or if any other application database is present (shared cluster, not supported yet).
-4. Waits up to 60 seconds for the SSD (`/volume1`, `/volume/<uuid>/`, or the `/dev/md3` mount).
+2. Takes a nonblocking run lock and validates PostgreSQL `14/apps`, port `5434`, configuration and the running data directory. Other layouts, PGDATA symlinks (including external WAL/tablespaces), and shared clusters are unsupported.
+3. Waits up to 60 seconds for both connection readiness and an active apps systemd unit before checking identity and listing databases. Without an authority marker, an absent `unifi-network` database means there is nothing to offload.
+4. Waits up to 60 seconds for the SSD (`/volume1`, `/volume/<uuid>/`, or the `/dev/md3` mount). If missing and PGDATA is unmounted, leaves services unchanged on eMMC and warns about stale data.
 5. Stops `unifi.service`, then `postgresql@14-apps.service`, and confirms the postmaster is gone.
 6. On first run, copies `data/` to `<ssd>/postgresql-14-apps/` through a temp dir.
 7. Sets the SSD dir to `postgres:postgres`, mode `0700`, and bind-mounts it over `/data/postgresql/14/apps/data`.
-8. Starts the cluster and waits for it. If it does not come up on the SSD copy in 60 seconds, the script unmounts and starts it on the eMMC copy again.
-9. Writes the marker `/data/unifi-pg-ssd/14-apps.ssd-active` and starts `unifi.service` plus any other active unit that depended on the cluster.
+8. Persists the copied data and authority marker `/data/unifi-pg-ssd/14-apps.ssd-active` before starting PostgreSQL on SSD.
+9. Checks PostgreSQL readiness and identity, then starts Network and the previously active application dependents. Critical operations are checked; errors and catchable interrupts enter the same recovery path.
 
 ### Why only `data/` is bind-mounted
 
@@ -52,79 +44,86 @@ The script uses the marker instead:
 
 | Marker | SSD copy | Action |
 |---|---|---|
-| present | present | Bind the SSD copy. No copy. (Normal boot.) |
+| present | present | Bind the SSD copy. No copy, including after missing-SSD fallback. |
 | absent | present | The eMMC copy is current. Move the SSD copy aside to `postgresql-14-apps.stale-<timestamp>` and re-migrate. |
-| any | absent | Migrate from the eMMC copy. |
+| absent | absent | Migrate from the eMMC copy. |
+| present | SSD mount unavailable | Leave unmounted eMMC operation unchanged, retain authority and warn. |
+| present | SSD mounted but copy invalid/missing | Stop application units and require manual recovery. Do not replace newer data with the eMMC snapshot. |
 
-The script removes the marker on every path where PostgreSQL stays on the eMMC for that boot (no SSD, start failure, copy failure, and so on), because the eMMC copy then takes real writes. A previous SSD copy is never deleted, only moved aside.
+Missing-SSD fallback favors availability, like `06`: the exposed eMMC database may be the original offload snapshot. When SSD returns, the next run rebinds the marked SSD copy automatically. Writes made only on eMMC during fallback are hidden, not merged or copied onto SSD; the underlying eMMC directory remains intact. A missing SSD underneath an existing bind is an error, not a live switch to eMMC.
 
-**Limit:** if you delete the script without following [Reverting](#reverting), the marker stays. PostgreSQL then runs on the eMMC copy, and re-deploying the script later binds the older SSD copy over it. Follow the revert steps, which remove the marker.
+During a first migration, failures before application restart can recover to eMMC, but only after confirmed shutdown, successful unmount (if needed), and durable marker removal. Except for the missing-mount fallback above, authoritative failures or failures after application restart has been attempted retain authority and leave the stack stopped for manual recovery. Previous SSD copies are preserved.
+
+**Limit:** this is not a boot interlock and installs no systemd hooks. Firmware may start Network on eMMC before late binding. Lock contention exits without changing services; skipped hooks and power loss can likewise expose stale eMMC data. Do not clear authority merely to get the app running.
 
 ### Known costs
 
-- **Every boot stops and restarts the Network app**, same as `06`. The bind mount cannot go under a running PostgreSQL.
-- **Writes in the boot window go to the eMMC copy and are hidden.** From cluster start to the bind mount (about one minute), the Network app writes to the eMMC copy. After the bind, the app restarts on the SSD copy and those writes are not visible. The eMMC copy remains a consistent cluster, because PostgreSQL is stopped cleanly before the bind.
-- **No backup yet.** `07-mongodb-ssd-backup.sh` runs `mongodump` and does not cover PostgreSQL. If the SSD fails, the gateway falls back to the eMMC snapshot from the last migration. Keep a console backup (Settings > Control Plane > Backups), or take a manual dump (see [Manual backup](#manual-backup)).
+- **Migration and offload boots stop and restart Network.** The bind mount cannot go under a running PostgreSQL.
+- **Boot-window writes can be lost.** Network writes to eMMC before rebinding are hidden afterward; the window depends on firmware boot ordering.
+- **Fallback can expose stale settings/history.** Returning SSD ends fallback on the next successful run and hides fallback-only writes. `09` preserves old archives until the authoritative bind is restored; neither fallback nor rebinding is lossless recovery.
+- **Backups need separate verification.** `07` does not cover PostgreSQL; [09](postgresql-ssd-backup.md) provides daily SSD/weekly eMMC archives. Neither an SSD-local dump nor the old eMMC snapshot is a current off-device backup.
+- **Overall eMMC write reduction is workload-dependent.** Moving PostgreSQL does not move application logs, firmware activity or other eMMC workloads.
 
-## Before you test
+## Requirements
 
-### 1. Disable 06 and 07
+Require physical recovery access, a downloaded Console backup, a verified [off-device PostgreSQL backup](#manual-backup), and a maintenance window for the Network restart. The SSD needs space for a new PGDATA copy while retaining any previous copy. Confirm `unifi-network` is the only application database in `14/apps`; shared clusters and external WAL/tablespaces are unsupported.
 
-On Network 11.0.81, `06` and `07` act on a MongoDB the app no longer uses. `06` still stops `unifi-mongodb.service` and restarts `unifi.service` at every boot. The effect of that on a PostgreSQL-mode app is not tested. Move both scripts out of the boot path and remove the backup cron. This keeps the MongoDB SSD copy in place as a reference.
+[09](postgresql-ssd-backup.md) can capture the pre-offload backup while PostgreSQL is still on eMMC. Copy the archive off-device and verify a restore before migration.
+
+### Retiring the MongoDB hooks
+
+After confirming PostgreSQL mode, no MongoDB process and no running Mongo backup, archive `06`, `07` and the cron outside active paths. Changing executable bits is insufficient: the boot runner can source non-executable `.sh` files. Preserve all Mongo data, backups and the generated backup helper.
 
 ```bash
-mkdir -p /data/on_boot.d.disabled
-mv /data/on_boot.d/06-mongodb-ssd-offload.sh /data/on_boot.d/07-mongodb-ssd-backup.sh /data/on_boot.d.disabled/
-rm -f /etc/cron.d/mongodb-ssd-backup
+bash <<'EOF'
+set -e
+ARCHIVE="/data/on_boot.d.disabled/mongodb-$(date +%Y%m%d%H%M%S)-$$"
+mkdir -p "$ARCHIVE"
+mv /data/on_boot.d/06-mongodb-ssd-offload.sh /data/on_boot.d/07-mongodb-ssd-backup.sh "$ARCHIVE/"
+if [ -f /etc/cron.d/mongodb-ssd-backup ]; then
+    mv /etc/cron.d/mongodb-ssd-backup "$ARCHIVE/"
+fi
+printf 'Hooks archived in %s; data, helper and current bind mount retained.\n' "$ARCHIVE"
+EOF
 ```
 
-The existing MongoDB bind mount (if mounted) stays until the next reboot. It is harmless, because `mongod` is not running.
+No service stop, unmount or copy-back is needed for this retirement. Restore the archived files to their original paths to undo it; do not do so alongside `08`. Archiving hooks is different from a management application's Remove operation, which may unmount or copy Mongo data. Do not reinstall retired Mongo hooks while using PostgreSQL offload.
 
-### 2. Capture the baseline (read-only)
+### Check the layout
 
-Send the output of these commands with your results. They answer the open questions below.
+Confirm the database, space, SSD mount and service dependencies before installation:
 
 ```bash
-date -u; uptime -s
-ubnt-device-info model_short; cat /usr/lib/version
-dpkg-query -W unifi-native
 cat /etc/default/postgresql/14-apps
-ls -la /data/postgresql/14/apps /data/postgresql/14/apps/data
 du -sh /data/postgresql/14/apps/data
 df -h /data
 findmnt /dev/md3
 pg_lsclusters
 runuser -u postgres -- psql -X -w -h /var/run/postgresql -p 5434 -d postgres \
   -Atc "SELECT datname, pg_size_pretty(pg_database_size(datname)) FROM pg_database ORDER BY 1;"
-runuser -u postgres -- psql -X -w -h /var/run/postgresql -p 5434 -d postgres \
-  -Atc "SELECT DISTINCT datname, usename, application_name FROM pg_stat_activity WHERE datname IS NOT NULL;"
 systemctl cat unifi.service | grep -E '^(Requires|Wants|After|BindsTo|ExecStartPre)='
 systemctl list-dependencies --reverse --plain postgresql@14-apps.service
-systemctl is-enabled unifi-mongodb.service; systemctl is-active unifi-mongodb.service
-grep -rs 'active.db.mode' /etc/default/unifi /usr/lib/unifi/data/system.properties
+ps -o args= -C unifi | tr ' ' '\n' | grep active.db.mode
 ```
 
-### 3. Measure eMMC writes before the change
+Measure eMMC sectors written before and after over comparable intervals: `date -u; awk '$3=="mmcblk0"{print $10}' /proc/diskstats` (512 bytes per sector). PostgreSQL may not reproduce MongoDB's write-pressure pattern.
 
-The offload only helps if the Network app's PostgreSQL write load on the eMMC is significant. Take a sector count, wait one hour, take it again. Field 10 of `/proc/diskstats` is sectors written (512 bytes each).
+## Installation
+
+Run the first migration manually before enabling boot persistence. The script takes **no arguments**, including `--dry-run`, and must be executed with Bash rather than sourced.
 
 ```bash
-date -u; awk '$3=="mmcblk0"{print $10}' /proc/diskstats
-# one hour later
-date -u; awk '$3=="mmcblk0"{print $10}' /proc/diskstats
+scp scripts/08-postgresql-ssd-offload.sh root@<gateway-ip>:/data/08-postgresql-ssd-offload.sh
+ssh root@<gateway-ip> 'bash /data/08-postgresql-ssd-offload.sh'
 ```
 
-Repeat the same measurement after the offload. The difference is the write load the offload removed.
-
-## Deploying
+After verifying the migration, install executable boot hooks in order:
 
 ```bash
-scp scripts/08-postgresql-ssd-offload.sh root@<gateway-ip>:/data/on_boot.d/
-ssh root@<gateway-ip> chmod +x /data/on_boot.d/08-postgresql-ssd-offload.sh
-
-# First run by hand. The Network app goes down for the copy.
-ssh root@<gateway-ip> 'date -u; /data/on_boot.d/08-postgresql-ssd-offload.sh; date -u'
+ssh root@<gateway-ip> 'install -o root -g root -m 0700 /data/08-postgresql-ssd-offload.sh /data/on_boot.d/08-postgresql-ssd-offload.sh'
 ```
+
+Install [09](postgresql-ssd-backup.md#installation-and-manual-use) afterward to recreate the backup cron at boot. The existing `udm-boot` service must be enabled; see [prerequisites](prerequisites.md).
 
 The script logs to stdout and to syslog with tag `postgresql-ssd-offload` (`journalctl -t postgresql-ssd-offload`).
 
@@ -149,92 +148,106 @@ ps -o args= -C unifi | tr ' ' '\n' | grep active.db.mode
 ls -lt /data/postgresql/14/apps/data/pg_wal | head -5
 ```
 
-Then reboot once and check the same items. The second run takes the "SSD copy is authoritative" path with no copy.
+Check that `14/main` is unchanged and Network shows current settings, clients and history. A manual rerun should verify the existing bind/marker without stopping services or copying data.
+
+Boot hooks must be **executable**. A non-executable `.sh` may be sourced by the runner, which is unsupported. To retire a hook, archive it outside the boot directory rather than changing its executable bit.
 
 ## Firmware Upgrade Safety
 
-Expected behavior, from the script logic. None of these cases is tested yet.
-
-- **UniFi Network upgrades:** The bind mount stays active while the app upgrades, so any schema change goes to the SSD copy.
-- **UniFi OS upgrades:** The overlay resets, but `/data/on_boot.d/`, the marker in `/data/unifi-pg-ssd/` and the SSD copy all persist. On the first boot, the cluster starts on the eMMC copy, then the script binds the SSD copy as on any boot. Writes in that boot window are hidden, as described in [Known costs](#known-costs).
-- **UniFi OS upgrade that changes the cluster:** If the firmware renames `/etc/default/postgresql/14-apps`, moves the data directory, or upgrades the cluster to PostgreSQL 16, the script exits without a bind mount and the cluster runs on the eMMC. A PostgreSQL major upgrade at boot runs before the bind mount, so it would upgrade the old eMMC copy, not the current SSD copy. If release notes mention a PostgreSQL upgrade, run [Reverting](#reverting) before you upgrade.
-- **SSD missing at boot:** The script falls back to the eMMC copy and removes the marker. The next boot with the SSD re-migrates from the eMMC and moves the older SSD copy aside.
+- **UniFi Network upgrades:** An intact bind keeps database schema changes on SSD. Changes to the database backend or cluster layout require compatibility review.
+- **UniFi OS upgrades:** `/data/on_boot.d/`, the authority marker and SSD data persist. The boot hook reapplies the bind, and `09` reinstalls the backup cron. Keep a fresh off-device backup before upgrading.
+- **Upgrades that change the cluster:** The script rejects unsupported layouts but cannot protect migrations that firmware performs before the hook runs. Revert before an upgrade that changes PostgreSQL version, paths or setup behavior.
+- **SSD missing at boot/manual execution:** With unmounted PGDATA, services are left unchanged on eMMC. Authority is retained, and the next successful run rebinds SSD without copying fallback eMMC data. Without authority, initial migration is skipped. An SSD failure while already bound does not automatically switch to eMMC.
 - **Factory reset:** Wipes `/data`, including the marker and the eMMC copy. If the SSD copy survives, the next run finds no marker and moves it aside to a `.stale-` dir before it migrates the new eMMC data. Nothing is overwritten.
 
 ## Reverting
 
 **Follow this order. Do not delete the SSD copy until the Network app works on the eMMC.**
 
-This path copies the current SSD data back to the eMMC, so no data is lost. Check `df -h /data` first: the eMMC needs room for a second copy of `data/` until step 8.
+Copy the current, readable SSD data back; do not select the old eMMC snapshot unless explicitly accepting loss of all later changes. Check `df -h /data` first: eMMC needs room for a second copy. Use the verified SSD mount below. Run as one Bash block; any failure must leave services stopped for investigation. Do not reboot mid-revert.
 
 ```bash
-# 1. Stop the Network app, then the cluster
+bash <<'EOF'
+set -euo pipefail
+SSD_MOUNT="/volume/<verified-uuid>" # Or /volume1; confirm with findmnt.
+SSD_PG_DIR="$SSD_MOUNT/postgresql-14-apps"
+PG_DATA=/data/postgresql/14/apps/data
+STATE_DIR=/data/unifi-pg-ssd
+test -f "$SSD_PG_DIR/global/pg_control"
+test "$(cat "$SSD_PG_DIR/PG_VERSION")" = 14
+exec 9>/run/postgresql-ssd-offload.lock
+flock -n 9
 systemctl stop unifi.service
 systemctl stop postgresql@14-apps.service
-pg_lsclusters
-# 14 apps must show "down". If not, stop here.
-
-# 2. Unmount the bind mount (shows the old eMMC copy underneath)
-umount /data/postgresql/14/apps/data
-
-# 3. Remove the boot script and the marker
-rm -f /data/on_boot.d/08-postgresql-ssd-offload.sh /data/unifi-pg-ssd/14-apps.ssd-active
-
-# 4. Keep the old eMMC copy aside, copy the current SSD copy in
-SSD_PG_DIR="$(findmnt -no TARGET /dev/md3 | head -1)/postgresql-14-apps"
-mv /data/postgresql/14/apps/data /data/postgresql/14/apps/data.pre-revert
-mkdir /data/postgresql/14/apps/data
-cp -a "$SSD_PG_DIR"/. /data/postgresql/14/apps/data/
-chown postgres:postgres /data/postgresql/14/apps/data
-chmod 0700 /data/postgresql/14/apps/data
-
-# 5. Start the cluster, then the Network app
+test ! -e "$PG_DATA/postmaster.pid"
+case "$(systemctl is-active postgresql@14-apps.service)" in
+    inactive|failed) ;;
+    *) echo "Cluster not stopped; aborting" >&2; exit 1 ;;
+esac
+if mountpoint -q "$PG_DATA"; then
+    test "$(stat -c '%d:%i' "$PG_DATA")" = "$(stat -c '%d:%i' "$SSD_PG_DIR")"
+    umount "$PG_DATA"
+fi
+ARCHIVE="/data/on_boot.d.disabled/postgresql-$(date +%Y%m%d%H%M%S)-$$"
+mkdir -p "$ARCHIVE"
+if [ -f /data/on_boot.d/08-postgresql-ssd-offload.sh ]; then
+    mv /data/on_boot.d/08-postgresql-ssd-offload.sh "$ARCHIVE/"
+fi
+NEW_DATA=$(mktemp -d "$PG_DATA.revert.XXXXXX")
+cp -a "$SSD_PG_DIR"/. "$NEW_DATA"/
+chown postgres:postgres "$NEW_DATA"
+chmod 0700 "$NEW_DATA"
+sync -f "$NEW_DATA"
+OLD_DATA="$PG_DATA.pre-revert-$(date +%Y%m%d%H%M%S)-$$"
+test ! -e "$OLD_DATA"
+mv -T "$PG_DATA" "$OLD_DATA"
+mv -T "$NEW_DATA" "$PG_DATA"
+sync -f "$PG_DATA"
+rm -f "$STATE_DIR/14-apps.ssd-active"
+sync -f "$STATE_DIR"
 systemctl start postgresql@14-apps.service
+runuser -u postgres -- psql -X -w -v ON_ERROR_STOP=1 -h /var/run/postgresql -p 5434 \
+    -d unifi-network -Atc 'SELECT 1;'
 systemctl start unifi.service
-
-# 6. Confirm both are healthy
-systemctl is-active postgresql@14-apps unifi
-
-# 7. Check the Network UI shows current data
-
-# 8. Only then remove the old eMMC copy
-rm -rf /data/postgresql/14/apps/data.pre-revert
+systemctl is-active --quiet postgresql@14-apps.service
+systemctl is-active --quiet unifi.service
+printf 'Reverted; previous eMMC data retained at %s. Verify Network UI and 14/main.\n' "$OLD_DATA"
+EOF
 ```
 
-To revert to the pre-migration eMMC copy instead (loses all changes since the migration), skip step 4.
+Keep the SSD copy and previous eMMC copy until application-level verification passes. Reverting to the pre-migration snapshot is a separate, explicitly lossy recovery decision.
 
 ### Recovering from a moved-aside copy
 
-If a fallback boot caused a re-migration, the previous SSD copy is in `<ssd>/postgresql-14-apps.stale-<timestamp>`. To use it: stop the stack and unmount as in steps 1-2, move `<ssd>/postgresql-14-apps` aside, rename the `.stale-` dir to `postgresql-14-apps`, and run the script again. Delete `.stale-` dirs you do not need, as nothing cleans them up.
+Choose the copy deliberately; there is no automatic merge of SSD and eMMC histories. Under the same run lock, stop Network and `14/apps`, confirm the postmaster exited, and unmount the verified bind. Preserve the current SSD directory under a new name before renaming the selected `.stale-*` copy to `postgresql-14-apps`.
+
+Validate its PostgreSQL version, ownership and layout, then bind it directly over PGDATA. Write the marker identifying that canonical SSD path through a temporary file, sync it, rename it to `14-apps.ssd-active`, and sync the state filesystem **before** starting PostgreSQL. Start `postgresql@14-apps.service` directly, verify it at socket `/var/run/postgresql`, port `5434`, then start Network. Do not invoke `08` while PostgreSQL is stopped: its initial database gate requires a running cluster. A later rerun will verify the bind and marker.
 
 ## Manual backup
 
-Until a `07`-style backup script exists, take a custom-format dump to the SSD:
+Use a completed [09 archive](postgresql-ssd-backup.md), copied off-device and restore-verified, or stream a custom-format dump and apps-cluster globals to a protected directory **on another machine**. Globals can contain password hashes; do not post dumps in issues. Also download a Console backup and save cluster config/service definitions.
 
 ```bash
-SSD="$(findmnt -no TARGET /dev/md3 | head -1)"
-mkdir -p "$SSD/unifi-pg-backup"
-runuser -u postgres -- pg_dump -h /var/run/postgresql -p 5434 -Fc unifi-network \
-  > "$SSD/unifi-pg-backup/unifi-network.dump"
+# On the backup machine, in a private backup directory:
+bash <<'EOF'
+set -e
+umask 077
+ssh root@<gateway-ip> 'runuser -u postgres -- pg_dump --cluster 14/apps -w -h /var/run/postgresql -p 5434 -Fc unifi-network' \
+  > unifi-network.dump.tmp
+mv unifi-network.dump.tmp unifi-network.dump
+ssh root@<gateway-ip> 'runuser -u postgres -- pg_dumpall --cluster 14/apps -w -h /var/run/postgresql -p 5434 --globals-only' \
+  > apps-globals.sql.tmp
+mv apps-globals.sql.tmp apps-globals.sql
+EOF
 ```
 
-Restore it with `pg_restore --clean --if-exists -d unifi-network` while `unifi.service` is stopped. The restore path is untested.
+Check command exit status, checksum the completed files, and verify a restore into an isolated compatible PostgreSQL instance with the required roles/owners. Listing the dump is not a restore test. Do not blindly replay globals into existing roles.
 
-## Open questions
+To restore to the existing apps database, stop Network but keep PostgreSQL running, confirm the target and roles, and use a dump readable by the PostgreSQL OS user:
 
-These need answers from a live gateway before the script can leave experimental status:
+```bash
+runuser -u postgres -- pg_restore --cluster 14/apps -h /var/run/postgresql -p 5434 --exit-on-error \
+  --single-transaction --clean --if-exists -d unifi-network /path/to/unifi-network.dump
+```
 
-- **Does `unifi.service` in 11.0.81 declare a dependency on `postgresql@14-apps.service`?** The script restarts the Network app either way, but a `Requires=` changes how the stop propagates.
-- **Is the `apps` cluster shared?** The name suggests other apps can use it. The script refuses if it finds any database other than `unifi-network`.
-- **What does `06` do on a PostgreSQL-mode boot?** It stops `unifi-mongodb.service` and starts `unifi.service`. If `unifi.service` still `Requires=unifi-mongodb.service`, that start brings `mongod` back. This is why `06` and `07` are disabled for the test. A follow-up change can make `06` and `07` exit when the Network app is on PostgreSQL, once the signal for that mode is known.
-- **How large is the eMMC write load from PostgreSQL?** With `synchronous_commit=off` and `wal_writer_delay=10000ms`, the cluster batches WAL writes. The flow-audit bulk deletes that hurt MongoDB may produce a different pattern here (autovacuum, checkpoints). The before and after measurement answers this.
-- **What happens on a PostgreSQL major upgrade?** The firmware ships PostgreSQL 16 binaries and `postgresql-cluster-14-*-upgrade` units for other clusters. An upgrade of the `apps` cluster to 16 would create a new cluster under `/data/postgresql/16/apps` on the eMMC, and the script (configured for `14-apps`) would stop matching. The expected result is a silent fallback to the eMMC, not data loss, but it is not tested.
-- **UCG-Max:** same model check as `06`, not tested.
-
-## What to report back
-
-- The baseline output from [Before you test](#2-capture-the-baseline-read-only).
-- The script output from the first manual run and from the first reboot (`journalctl -t postgresql-ssd-offload -b`).
-- The verification output.
-- The eMMC sector counts before and after.
-- Anything wrong in the Network UI after the migration (missing clients, stats, settings).
+Validate application data before restarting Network. Never target port `5432`. A verified isolated database restore does not establish full gateway application recovery.

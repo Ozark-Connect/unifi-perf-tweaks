@@ -16,7 +16,7 @@ After extended testing, JVM heap parameter tweaks showed minimal measurable impa
 
 The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
 
-Every script here has been running on a production gateway serving real users. This is not theoretical.
+These tweaks have been tested on production gateways, primarily a UCG-Fiber. PostgreSQL offload moves the database writes to NVMe; its effect on total eMMC writes depends on the workload.
 
 Several of these tweaks are already available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer), which handles deployment, version tracking, and updates automatically. The scripts here are the upstream source — use them directly if you prefer manual control, or use Network Optimizer if you want a managed experience.
 
@@ -26,7 +26,7 @@ Several of these tweaks are already available as one-click deployments through [
 
 **These modifications are at your own risk.**
 
-Everything here has been thoroughly tested and vetted on production hardware - but it's only been tested on a UCG-Fiber. If you're running a different model, there's a real chance something could go wrong due to different paths, mount points, or service behavior. In a worst-case scenario, you may need to factory reset your gateway and restore from backup.
+These tweaks have been tested on production hardware, primarily a UCG-Fiber. If you're running a different model, there's a real chance something could go wrong due to different paths, mount points, or service behavior. In a worst-case scenario, you may need to factory reset your gateway and restore from backup.
 
 **Before you touch anything:**
 
@@ -48,7 +48,7 @@ If you're not comfortable SSH-ing into your gateway and recovering from a bad bo
 
 ## Tested Platform
 
-**All scripts have been developed and tested exclusively on a UCG-Fiber.** They should work on other UniFi Cloud Gateway and UDM-Pro based devices, but have **not been verified** on those platforms.
+**Scripts were developed and tested on a UCG-Fiber.** Other models require separate verification.
 
 ### Verified UniFi OS versions (UCG-Fiber / UXG-Fiber)
 
@@ -102,7 +102,8 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`05-jvm-heap-tuning.sh`](scripts/05-jvm-heap-tuning.sh) | 05 | Lock JVM heap to prevent GC thrashing | All UCG | **Low impact** |
 | [`06-mongodb-ssd-offload.sh`](scripts/06-mongodb-ssd-offload.sh) | 06 | Move MongoDB from eMMC to NVMe SSD | UCG with NVMe SSD | Stable |
 | [`07-mongodb-ssd-backup.sh`](scripts/07-mongodb-ssd-backup.sh) | 07 | Scheduled MongoDB backups (SSD + eMMC failover) | UCG with NVMe SSD | Stable |
-| [`08-postgresql-ssd-offload.sh`](scripts/08-postgresql-ssd-offload.sh) | 08 | Move the Network app PostgreSQL database (Network 11.0.81+) from eMMC to NVMe SSD | UCG with NVMe SSD | **Experimental** |
+| [`08-postgresql-ssd-offload.sh`](scripts/08-postgresql-ssd-offload.sh) | 08 | Move the Network app PostgreSQL database (Network 11.0.81+) from eMMC to NVMe SSD | UCG-Fiber/Max with SSD | Stable |
+| [`09-postgresql-ssd-backup.sh`](scripts/09-postgresql-ssd-backup.sh) | 09 | Scheduled PostgreSQL database + globals backups (SSD + compressed eMMC archive) | UCG-Fiber/Max with SSD | Stable |
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
@@ -110,7 +111,9 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 > **SGMII+ (`19` / `20`):** Promoted from Testing to Stable — the modules have been running continuously on production UCG-Fiber and UXG-Fiber gateways for a couple months, across every UniFi OS release from 5.1.15 through 6.0.5, including the 6.0.x Debian 13 rebase (no rebuild needed). Deploy **one script at a time**: loading both modules simultaneously is not supported (see the [port bitmap caveat](docs/sfp-sgmiiplus.md#port-bitmap-exclusion)).
 
-> **PostgreSQL SSD offload (`08`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. `08` is the PostgreSQL counterpart. It has not run on a gateway yet. Read [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) first, including the step that disables `06` and `07` for the test.
+> **PostgreSQL SSD offload (`08`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. Use `08`/`09` for the supported `14/apps` cluster. Like Mongo's late-bind approach, boot-window writes can be hidden and missing-SSD fallback may expose stale eMMC data. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) for installation, upgrade behavior and current-data copy-back.
+
+> **PostgreSQL backup (`09`):** Mirrors `07`'s daily SSD/weekly eMMC backups with database and roles/globals coverage. It can run before `08` while PGDATA is still on eMMC. Copy a completed archive off-device and verify a restore before migration; see [docs/postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md).
 
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
 
@@ -118,12 +121,13 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sensible default order. You can renumber to fit your existing boot scripts, but **respect the dependency chain:**
 
-- **`05` must come before `06` and `08`** - JVM heap tuning edits `/etc/default/unifi`, and `06` (MongoDB) or `08` (PostgreSQL) is what triggers the unifi restart that picks up the new config. If the offload script runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
+- **`05` must come before `06` or `08`** - JVM heap tuning edits `/etc/default/unifi`, and the offload script triggers the unifi restart that picks up the new config. If the offload script runs first, unifi restarts with stock heap and the JVM fix is queued until the next reboot (two-reboot convergence instead of one).
 - **`07` must come after `06`** - the backup script depends on the SSD offload being set up.
-- **`06`/`07` or `08`, not both.** `06`/`07` apply to UniFi Network up to 10.x (MongoDB). `08` applies to Network 11.0.81 and later (PostgreSQL). See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) for the test setup that disables `06`/`07`.
-- `05`-`08` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against a stable, bind-mounted, already-restarted environment.
+- **`08` uses late boot binding**, without a systemd interlock. It must be executable, not sourced. `09` follows `08` but can also run before migration or after checked copy-back; unresolved authority blocks backups until the correct bind is restored.
+- **`06`/`07` or `08`/`09`, not both.** Choose according to Network's active database backend. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md#retiring-the-mongodb-hooks) for retiring `06`/`07`.
+- Offload runs before later hooks (`10`, `15`), but a failed/skipped offload does not guarantee a stable SSD-backed environment.
 - `10`, `15`, `19`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
-- **If you add your own boot scripts** that touch the database or unifi (mongodump, psql, API calls, etc.), number them >= `10` so they run after `06` or `08` has finished the bind mount and service restart.
+- **If you add your own boot scripts** that touch the database or unifi (mongodump, psql, API calls, etc.), number them >= `10` so they run after `06` or `08`. Check offload success/authority first; numbering does not prevent stale eMMC startup or guarantee a successful bind.
 
 ### Model Compatibility
 
@@ -225,7 +229,8 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [fan-control-tuning.md](docs/fan-control-tuning.md) - PID controller explained, per-model setup
 - [mongodb-ssd-offload.md](docs/mongodb-ssd-offload.md) - migration, firmware upgrade safety
 - [mongodb-ssd-backup.md](docs/mongodb-ssd-backup.md) - backup schedule, failover strategy
-- [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - **experimental** PostgreSQL offload for Network 11.0.81+, test procedure, open questions
+- [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - PostgreSQL SSD offload, installation, upgrade behavior and recovery
+- [postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md) - PostgreSQL backup schedule, globals coverage and off-device restore
 - [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
 
 ### Research
