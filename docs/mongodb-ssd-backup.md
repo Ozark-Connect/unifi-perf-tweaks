@@ -5,7 +5,7 @@
 **Risk level:** Low - backup-only, does not modify the running database
 **Depends on:** [`06-mongodb-ssd-offload.sh`](../scripts/06-mongodb-ssd-offload.sh) must be deployed first
 
-> **UniFi Network 11.0.81 and later:** the Network app runs on PostgreSQL, not MongoDB. This script then dumps a MongoDB the app no longer uses. The nightly `mongodump` fails, and the live database has no backup from this script. See [postgresql-ssd-offload.md](postgresql-ssd-offload.md) (experimental) for the PostgreSQL offload and its revert steps.
+> **UniFi Network 11.0.81 and later:** the Network app runs on PostgreSQL, not MongoDB. This script then dumps a MongoDB the app no longer uses. The nightly `mongodump` fails, and the live database has no backup from this script. See [postgresql-ssd-backup.md](postgresql-ssd-backup.md) for the PostgreSQL backup companion.
 
 > **Note on SSD mount paths:** Examples in this doc use `/volume1` for clarity, but the script auto-detects the SSD mount point. UniFi OS 5.0.x and earlier use `/volume1`; UniFi OS 5.1.7 EA and newer use `/volume/<uuid>/`. See [mongodb-ssd-offload.md](mongodb-ssd-offload.md) for details.
 
