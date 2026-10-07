@@ -40,6 +40,17 @@ The mode set causes the target interface to flap briefly (~300ms) while the PLL 
 
 Loading both modules simultaneously is **not currently supported**. Each module independently saves and restores the full polling loop port bitmap. The second module to load would save the first module's already-modified bitmap as "original," corrupting the restore state. Supporting dual-port SGMII+ requires coordinated bitmap manipulation (each module toggling only its own port bit) — tracked as future work.
 
+## SFP compatibility
+
+The module changes only the gateway side of the link. The SFP must switch its own host-side SerDes to 2.5G SGMII+ / HSGMII to match. If it stays at 1G, the gateway reports 2.5G but no traffic passes, or the port reverts to 1G.
+
+| SFP | Status | Notes |
+|---|---|---|
+| Calix 100-05609 | Works | |
+| LuLeey LL-XS2510 | Works | |
+| Zyxel PMG3000-D20B | Works on firmware V2.50+ | Older firmware has SFP PHY issues that the V2.50 lineage fixes |
+| ODI DFP-34X-2C2 / DFP-34X-2CY3 | Not supported | Auto-sensing cannot switch between SGMII and HiSGMII ([Hack GPON known bug](https://hack-gpon.org/ont-odi-realtek-dfp-34x-2c2/)). A stored HiSGMII `LAN_SDS_MODE` did not take effect at runtime on V1.7.1-231022 ([#3](https://github.com/Ozark-Connect/unifi-perf-tweaks/issues/3)) |
+
 ## Important caveats
 
 ### Port bitmap exclusion
