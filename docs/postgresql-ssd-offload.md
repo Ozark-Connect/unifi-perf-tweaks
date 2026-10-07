@@ -71,7 +71,7 @@ An existing, verified bind exits before any database check. A rerun on an offloa
 - **Boot-window writes can be lost.** Network writes to eMMC before rebinding are hidden afterward; the window depends on firmware boot ordering.
 - **Fallback can expose stale settings/history.** Returning SSD ends fallback on the next successful run and hides fallback-only writes. `09` preserves old archives until the authoritative bind is restored; neither fallback nor rebinding is lossless recovery.
 - **Backups need separate verification.** `07` does not cover PostgreSQL; [09](postgresql-ssd-backup.md) provides daily SSD/weekly eMMC archives. Neither an SSD-local dump nor the old eMMC snapshot is a current off-device backup.
-- **Total eMMC writes may not drop.** Moving PostgreSQL does not move application logs, the UniFi OS core cluster (`14/main`), firmware activity or other eMMC workloads. One field measurement (UCG-Fiber, Network 11.0.81, matched ~10.5 h windows) showed no drop in total `mmcblk0` writes after the offload: about 140 MiB/h before and 168 MiB/h after. Attribution of the remaining writes is open.
+- **Total eMMC writes may not drop.** Moving PostgreSQL does not move application logs, the UniFi OS core cluster (`14/main`), firmware activity or other eMMC workloads. One field measurement (UCG-Fiber, Network 11.0.81, matched ~10.5 h windows) showed no drop in total `mmcblk0` writes after the offload: about 140 MiB/h before and 168 MiB/h after. On a second UCG-Fiber, the remaining load is mostly fsync-driven write amplification on application log files, and `14/main` wrote no WAL in the sample. See [the Network 11 write inventory](emmc-write-pressure.md#network-11-postgresql-write-inventory).
 
 ## Requirements
 
