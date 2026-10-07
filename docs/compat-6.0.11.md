@@ -1,6 +1,6 @@
 # UniFi OS 6.0.11 Compatibility Verification
 
-**Result: compatible.** Static check of the UCG-Fiber image on 2026-10-04. No live check. The UXG-Fiber is covered by inference ([below](#uxg-fiber)).
+**Result: compatible.** Static check of the UCG-Fiber image on 2026-10-04. No live check.
 
 | | |
 |---|---|
@@ -11,12 +11,12 @@
 | vermagic | `5.4.213-ui-ipq9574 SMP preempt mod_unload aarch64`, unchanged. No module rebuild. |
 | Baseline | 6.0.10 UCG-Fiber image |
 
-| Tweak | Static (UCG-Fiber image) | UXG-Fiber (inferred) |
-|---|---|---|
-| 19 + 20 SGMII+ | ✓ `qca-ssdk.ko` byte-identical to 6.0.10 | ✓ |
-| 06 + 07 MongoDB | ✓ `mongod`, `unifi-mongodb.service`, `/etc/default/unifi` identical to 6.0.10 | n/a (no MongoDB) |
-| 10 journald | ✓ `journald.conf` and `syslog-ng/` identical to 6.0.10 | ✓ |
-| 15 fan | ✓ `ufcd.service` and `ustd` `sdb_client` `.so` identical to 6.0.10. `ustd` unchanged at 6.0.9 | ✓ |
+| Tweak | Static (UCG-Fiber image) |
+|---|---|
+| 19 + 20 SGMII+ | ✓ `qca-ssdk.ko` byte-identical to 6.0.10 |
+| 06 + 07 MongoDB | ✓ `mongod`, `unifi-mongodb.service`, `/etc/default/unifi` identical to 6.0.10 |
+| 10 journald | ✓ `journald.conf` and `syslog-ng/` identical to 6.0.10 |
+| 15 fan | ✓ `ufcd.service` and `ustd` `sdb_client` `.so` identical to 6.0.10. `ustd` unchanged at 6.0.9 |
 
 ## Kernel
 
@@ -37,10 +37,6 @@ Same 362-module set as 6.0.10. 5 changed md5, all from the `qca-nss-ecm` package
 `qca-ssdk-shell` is the userland `ssdk_sh` tool. The SGMII+ module does not use it.
 
 No package was added or removed. The unit set and `/etc/cron.d` are identical to 6.0.10.
-
-## UXG-Fiber
-
-No UXG-Fiber 6.0.11 build was available for this check. This check assumes the UXG-Fiber gets the same 6.0.11 kernel, modules and tweak userland as the UCG-Fiber. 6.0.10 supports that assumption: the UXG-Fiber `qca-ssdk.ko` and `qca-nss-dp.ko` were byte-identical to the UCG-Fiber image ([compat-6.0.10.md](compat-6.0.10.md#live-uxg-fiber-2026-09-29)). Confirm with an md5 of the live `qca-ssdk.ko` once a UXG-Fiber is on 6.0.11. It should be `9187a544…`.
 
 ## Outstanding
 
