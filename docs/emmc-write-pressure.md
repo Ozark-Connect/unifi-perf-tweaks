@@ -47,6 +47,66 @@ These were additional eMMC write sources found during investigation. They're doc
 | `ubnt-dpkg-daemon` version loop | Repeated writes checking package versions | Fix the version mismatch in `/persistent/dpkg/` |
 | Suricata logs | ~1.3MB/hr when IPS is on | Offload to SSD or reduce log verbosity |
 
+## Network 11 (PostgreSQL) Write Inventory
+
+Measured on a fleet UCG-Fiber: UniFi OS 6.0.10, UniFi Network 11 in PostgreSQL mode, [PostgreSQL SSD offload](postgresql-ssd-offload.md) and [journald volatile](journald-volatile.md) active. Windows were 5 to 10 minutes, so treat the rates as a snapshot, not a daily average.
+
+### Where the eMMC writes go
+
+Rates come from `/sys/fs/ext4/<partition>/session_write_kbytes`. This counter includes journal and metadata blocks.
+
+| Partition | Mount | Rate | Per day |
+|---|---|---|---|
+| `mmcblk0p6` | `/` overlay upper (holds `/data`) | ~20 KiB/s | ~1.7 GiB |
+| `mmcblk0p4` | `/var/log` | ~5.5 KiB/s | ~0.45 GiB |
+| `mmcblk0p5` | `/persistent` | 0 | 0 |
+
+### PostgreSQL clusters
+
+The gateway runs three PostgreSQL 14 clusters. The offload moves only `apps`, and that is the only one with measurable write load.
+
+| Cluster | Port | Data dir | WAL in 5 min | On eMMC? |
+|---|---|---|---|---|
+| `apps` (UniFi Network) | 5434 | `/data/postgresql/14/apps/data` | 1.76 MiB (~0.5 GiB/day before checkpoint writes) | No, offloaded |
+| `main` (UniFi OS core, `ulp-go`) | 5432 | `/data/postgresql/14/main/data` | 0 | Yes |
+| `protect` | 5433 | `/srv/postgresql/14/protect/data` | Not measured | Not checked |
+
+`main` shows millions of commits in `pg_stat_database` (`ulp-go` alone has 2.3M). These are read transactions: the WAL position did not move. Both measured clusters run `synchronous_commit=off`. The `protect` cluster held no data files open for write on a gateway with no recording load. A site that records cameras can differ.
+
+### The remaining load is log write amplification
+
+Log files on the overlay grew by only ~56 KiB/min across all of them. The partition took ~1.2 MiB/min. The difference is amplification:
+
+- `/proc/fs/jbd2/mmcblk0p6-8/info` showed 94% of journal commits since boot as *requested* commits, which means a process called `fsync`/`fdatasync`. In a 60 s sample, all 12 commits were requested, so about one every 5 s.
+- Each commit logs ~12 blocks (48 KiB) to the journal.
+- With `data=ordered`, each commit also writes out the dirty tail block of every file appended since the previous commit. About 20 log files are appended continuously, so most commits rewrite most of those tail blocks.
+
+The fsync caller is not identified. This kernel has no `/proc/<pid>/io` (no task I/O accounting), no ftrace, and no `strace`. The most likely candidate is `udapi-server` rewriting `/data/udapi-config/mdns.cache` in place every ~3 s.
+
+`ulp-go-app` opens `/data/ulp-go/log/std.log` and `std.err.log` with `O_SYNC` (fd flags `04412001`), and `unifi-identity-update` does the same in `/var/log/unifi_package-identity-update/`. Each append forces a journal commit. `std.log` was written only every 2 minutes during the sample, so it is not the 5 s driver.
+
+### Active writers by location
+
+From a 1 s poll of changed files over 60 s and `lsof` open-for-write handles:
+
+| Location | Writers |
+|---|---|
+| `/data/unifi/logs/` | `tasks.log`, `access.log`, `gc.log`, `server.log`, `stats.log`, `matter-controller/*.log` |
+| `/data/unifi-core/logs/` | `nginx-access.log`, `health.log`, `health.pressure.log`, `cloud.devices.log` and ~40 more open for append |
+| `/data/ulp-go/log/` | `all.log`, `identity.log`, `vpn.log`, `std.log`, `metrics/metrics-<date>.log` and ~30 more open for append |
+| `/var/cache/nginx/` (overlay) | `proxy_temp/*` buffered responses, `uos_auth/*` cache entries rewritten every few seconds |
+| `/data/udapi-config/` | `mdns.cache` every ~3 s |
+| `/var/lib/rabbitmq/`, `/var/lib/fluent-bit-audit/` | Open for write, no change seen in the 60 s poll |
+| `/var/log/` | `query-dnscrypt-proxy-doh-0.log` (largest on the partition), `analytic_report.log`, `mem_trend/*.csv`, `sysstat/sa*` |
+
+### What would reduce it
+
+Not implemented. Candidates in order of expected effect:
+
+1. **Move the three application log directories off the eMMC** (`/data/unifi/logs`, `/data/unifi-core/logs`, `/data/ulp-go/log`), with a bind mount from the SSD as `08` does for PostgreSQL. This removes the files that the fsync-driven commits flush. The services hold these files open, so the bind must be in place before they start, or the services must restart after it.
+2. **Put `/var/cache/nginx/proxy_temp` and `uos_auth` on tmpfs.** Both hold disposable data.
+3. **Find the fsync caller.** If it is `mdns.cache`, a bind mount for that one file removes the commit cadence that drives the amplification.
+
 ## How to Check Your eMMC Write Pressure
 
 ```bash
