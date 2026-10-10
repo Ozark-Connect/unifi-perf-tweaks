@@ -16,7 +16,7 @@ After extended testing, JVM heap parameter tweaks showed minimal measurable impa
 
 The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
 
-Every script here has been running on a production gateway serving real users. This is not theoretical.
+The established tuning scripts have been running on a production gateway serving real users. New opt-in experiments are marked **Testing** below; read their measured scope and deployment caveats before enabling them.
 
 Several of these tweaks are already available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer), which handles deployment, version tracking, and updates automatically. The scripts here are the upstream source — use them directly if you prefer manual control, or use Network Optimizer if you want a managed experience.
 
@@ -102,8 +102,11 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
 | [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | **Testing** |
+| [`25-wan-fq-pacing.sh`](scripts/25-wan-fq-pacing.sh) | 25 | Opt-in, rate-free socket pacing for native WAN TCP; original GSO limits unchanged | UCG-Fiber | **Testing / opt-in** |
 
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
+
+> **WAN pacing (`25`):** Verified benefit is for gateway-native TCP on the tested PPP WAN, not a universal 550 Mbps fix. Accelerated wired forwarding largely bypassed the PPP queue. This separate loader does not change the SFP module or require a configured upload speed; see [deployment, evidence, and rollback](docs/sfp-sgmiiplus.md#opt-in-native-wan-tcp-pacing-testing).
 
 ### Boot Order
 
@@ -215,7 +218,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [fan-control-tuning.md](docs/fan-control-tuning.md) - PID controller explained, per-model setup
 - [mongodb-ssd-offload.md](docs/mongodb-ssd-offload.md) - migration, firmware upgrade safety
 - [mongodb-ssd-backup.md](docs/mongodb-ssd-backup.md) - backup schedule, failover strategy
-- [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
+- [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats; separate [opt-in native WAN pacing](docs/sfp-sgmiiplus.md#opt-in-native-wan-tcp-pacing-testing)
 
 ### Research
 

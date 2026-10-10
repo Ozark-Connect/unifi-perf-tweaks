@@ -260,6 +260,177 @@ SGMII+ mode restored after drift
 PCS status ..., host link ...
 ```
 
+## Opt-in native WAN TCP pacing (testing)
+
+[`scripts/25-wan-fq-pacing.sh`](../scripts/25-wan-fq-pacing.sh) and its
+[`scripts/wan-fq-pacing.py`](../scripts/wan-fq-pacing.py) companion are a separate,
+optional userspace mitigation. **Installing the `25` script in
+`/data/on_boot.d/` opts in.** The existing `20-sfp-sgmiiplus.sh` loader and kernel
+module are unchanged; SGMII+ deployment alone does not enable pacing.
+
+### Measured scope, not a universal upload fix
+
+On the tested UCG-Fiber/PPP WAN, repeated identical gateway-native TCP tests
+with `fq` alone reached **491–494 Mbps at 34–35% CPU**. Also reducing the GSO
+segment limit to one reached about **466 Mbps at 44–46% CPU**; segment limits
+of two, four, and eight offered no advantage. This implementation therefore
+**leaves the original GSO limits untouched**.
+
+During 55 seconds of native upload, with an overlapping 25-second download,
+the original queue measured **301/1015 Mbps**, versus **442/1007 Mbps**
+with `fq`. Loaded ping p95 was about **9.5 ms**, with no ping loss; ONU drops
+remained. These are native TCP mitigation results, **not a verified 550 Mbps
+upload fix** and not evidence that every flow benefits.
+
+Wired tests measured 521 Mbps untouched versus 515 Mbps with `fq`, but used
+different Apple servers and are not a controlled throughput comparison. Only
+**0.22–0.23%** of wired-test bytes hit the `ppp0` qdisc, compared with **97–98%**
+for native traffic. That acceleration gap limits what a PPP software queue can
+do for forwarded wired traffic.
+
+Linux `fq` follows the socket's dynamically selected TCP pacing rate; there is
+**no upstream Mbps setting, fixed-rate shaper, or speed configuration**. The
+helper only manages the selected interface's root qdisc. It never changes GSO,
+MTU, offloads, ONU settings, or the SFP kernel module.
+
+### Prerequisites and interface selection
+
+Use root for start/stop and queue changes. The gateway needs Python 3 (standard
+library only), a running systemd with `systemd-run` and `Type=exec` support,
+`systemctl`, `flock`, `tc` (iproute2, for class/filter preflight), and kernel
+support for `fq`. Boot execution additionally
+requires [udm-boot](prerequisites.md). Missing prerequisites fail explicitly.
+
+The default interface is **`ppp0`**, not the physical SFP port `eth6`. Confirm
+your WAN's actual interface before installing. For another interface, change
+`INTERFACE="ppp0"` near the top of the deployed shell script; this makes the
+selection persistent at boot. Manual commands can instead pass
+`--interface NAME`, including to `--status` and `--stop`. There is no speed
+setting to edit. Stop the old configured watcher before changing this selection:
+an existing unit with a different interface or unexpected configuration is
+refused rather than silently reused or replaced.
+
+### Deploy and start manually
+
+Run these from your local checkout, after reviewing the scripts:
+
+```bash
+# Copy the companion first; it must remain available for crash/stop recovery.
+ssh root@<gateway-ip> "mkdir -p /data/wan-fq-pacing"
+scp scripts/wan-fq-pacing.py root@<gateway-ip>:/data/wan-fq-pacing/wan-fq-pacing.py
+
+# Adding this separate boot entry is the opt-in.
+scp scripts/25-wan-fq-pacing.sh root@<gateway-ip>:/data/on_boot.d/25-wan-fq-pacing.sh
+ssh root@<gateway-ip> "chmod +x /data/on_boot.d/25-wan-fq-pacing.sh"
+
+# Start without rebooting; returns after the watcher executable starts.
+ssh root@<gateway-ip> /data/on_boot.d/25-wan-fq-pacing.sh
+
+# Service configuration/state followed by read-only helper JSON.
+ssh root@<gateway-ip> /data/on_boot.d/25-wan-fq-pacing.sh --status
+ssh root@<gateway-ip> systemctl status wan-fq-pacing.service --no-pager
+ssh root@<gateway-ip> journalctl -u wan-fq-pacing.service --no-pager -n 30
+```
+
+The transient **`wan-fq-pacing.service`** runs
+`/data/wan-fq-pacing/wan-fq-pacing.py --watch --interface ppp0
+--state-directory /run/wan-fq-pacing` under Python 3. It is `Type=exec`, with a
+15-second stop timeout and an `ExecStopPost` command that runs the same helper's
+`--restore` for the same interface. `ExecStopPost` also recovers the owned queue
+after a watcher crash. There is **no automatic service restart, retry loop, or
+kernel reload**. Loader invocations are serialized; repeated invocation while
+the matching service is active does nothing and does not reset the queue.
+
+The helper's status JSON contains `current`, `state`, and `owns_queue`. An absent
+interface has `current: null`; when pacing is owned, the root is `fq` with handle
+`7f51:` (`0x7f510000`) and `owns_queue` is true. To obtain JSON alone, use:
+
+```bash
+ssh root@<gateway-ip> python3 /data/wan-fq-pacing/wan-fq-pacing.py \
+    --status --interface ppp0 --state-directory /run/wan-fq-pacing
+```
+
+The watcher waits if the interface is missing and listens for kernel link
+events, including PPP teardown/recreation. On reconnect it reconciles the new
+interface and saves that interface's own baseline before applying. It does not
+restore an old interface's snapshot onto a newly created interface. There is no
+periodic polling or recurring status log; inspect the service journal for
+transitions and errors. An active service alone does not prove it owns a queue:
+missing interfaces and pre-existing custom queues can legitimately leave
+`owns_queue` false.
+
+### Ownership and restoration limits
+
+Only a default **root `fq_codel` with handle zero and no classes or filters** is
+eligible. A pre-existing `fq` or custom root is left alone. The first apply saves
+the complete original root configuration in
+**`/run/wan-fq-pacing/ppp0.json`** (or `NAME.json` for another selected interface);
+repeated apply does not overwrite that baseline or reset an already owned queue.
+
+Restoration requires the same interface lifetime and the still-owned applied
+configuration. Lifetime checks combine the interface index with its sysfs
+device inode: the target kernel can reuse an index after interface recreation.
+A foreign replacement is preserved, including changed options on an `fq` queue
+that retains the same `7f51:` handle. Do not delete the `/run`
+state while pacing is active: without the saved baseline and ownership evidence,
+the helper cannot safely reconstruct the original queue. State is intentionally
+volatile and does not persist across reboot.
+
+Restoration restores **configuration**, not queued packets, queue statistics,
+or the historical state of TCP connections. Replacing a qdisc can discard
+queued packets. It is not a rollback of ONU drops or other WAN settings.
+
+Keep the kernel's global default qdisc policy unchanged while this helper is
+active. If removing the owned queue recreates a different default qdisc kind,
+exact handle-zero restoration is refused rather than guessing a replacement.
+
+### Validation
+
+The isolated Linux-root suite exercises real TAP interfaces and qdiscs without
+changing global policy or sending traffic through the live WAN:
+
+```bash
+python3 -B -m unittest discover -s tests -p 'test_wan_fq_pacing.py' -v
+```
+
+All **10 tests passed** on `5.4.213-ui-ipq9574`, covering repeated application,
+missing-interface startup, interface recreation, foreign queue preservation,
+normal shutdown, and recovery of an orphaned watcher.
+
+A live `ppp0` smoke run with this helper measured **496 Mbps native upload**.
+Three concurrent loader invocations retained the same watcher, baseline, and
+queue counters. A mismatched interface was rejected. Both normal service stop
+and a forced `SIGKILL` recovered the exact original queue through the watcher
+or `ExecStopPost`; GSO limits remained unchanged. Actual reboot execution was
+not tested.
+
+### Disable and roll back
+
+**Disable the boot entry first**, then stop the watcher and restore. Do not
+remove the Python helper or its state before stopping; both are needed for
+ownership-aware recovery.
+
+```bash
+# Move outside on_boot.d, so the boot runner cannot execute it again.
+ssh root@<gateway-ip> \
+    "mv /data/on_boot.d/25-wan-fq-pacing.sh /data/wan-fq-pacing/25-wan-fq-pacing.sh.disabled"
+
+# Stops the service, waits for ExecStopPost, then repeats restore safely.
+ssh root@<gateway-ip> /data/wan-fq-pacing/25-wan-fq-pacing.sh.disabled --stop
+ssh root@<gateway-ip> /data/wan-fq-pacing/25-wan-fq-pacing.sh.disabled --status
+
+# Explicit restore is also idempotent, after the watcher has stopped.
+ssh root@<gateway-ip> python3 /data/wan-fq-pacing/wan-fq-pacing.py \
+    --restore --interface ppp0 --state-directory /run/wan-fq-pacing
+```
+
+Use the original configured `--interface NAME` when stopping a non-default
+watcher. Repeating `--stop` or `--restore` is safe; neither overwrites a foreign
+queue. If ownership has been lost, a custom queue remaining in status is
+intentional, not a reason to force-delete it. These commands do not unload the
+SFP module; module rollback is independent and described below.
+
+
 ## Reverting
 
 ### Immediate (until next reboot)
