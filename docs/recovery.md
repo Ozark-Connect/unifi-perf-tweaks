@@ -2,6 +2,8 @@
 
 If `06-mongodb-ssd-offload.sh` / `07-mongodb-ssd-backup.sh` misbehaves and you need to get back to stock eMMC behavior, pick the right recovery path below. All four paths require SSH access to the gateway, which almost always survives any failure mode these scripts can cause because they don't touch `sshd`, routing, or network config.
 
+> **UniFi Network 11.0.81 and later:** the Network app runs on PostgreSQL, not MongoDB. The paths below move or restore MongoDB data only. They do not touch the live PostgreSQL database. See [postgresql-ssd-offload.md](postgresql-ssd-offload.md) (experimental) for the PostgreSQL offload and its revert steps.
+
 ## Which path should I use?
 
 ```

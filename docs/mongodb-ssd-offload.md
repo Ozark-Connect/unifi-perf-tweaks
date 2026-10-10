@@ -4,6 +4,8 @@
 **Compatibility:** UCG models with NVMe SSD (UCG-Fiber, UCG-Max, etc.)
 **Risk level:** Medium - moves database I/O to a different device. Has graceful fallback to eMMC.
 
+> **UniFi Network 11.0.81 and later:** the Network app runs on PostgreSQL, not MongoDB. This script then offloads a MongoDB the app no longer uses, and the live database stays on the eMMC. See [postgresql-ssd-offload.md](postgresql-ssd-offload.md) for the PostgreSQL offload and its revert steps.
+
 > **Note on SSD mount paths:** UniFi OS 5.0.x and earlier mount the NVMe SSD at `/volume1`. UniFi OS 5.1.7 EA and newer mount it at `/volume/<uuid>/` instead. The script auto-detects both layouts at runtime, so the examples in this doc use `/volume1` for clarity but will apply to either path on your gateway. If you need to check manually, run `findmnt /dev/md3`.
 
 ## Problem
@@ -107,6 +109,30 @@ systemctl is-active unifi unifi-mongodb
 
 For a fully paste-ready single-block version of this rollback (including the backup script cleanup from 07), see [recovery.md](recovery.md).
 
+## Decommissioning after the PostgreSQL migration
+
+UniFi Network 11.0.81 and later run on PostgreSQL. To retire `06`/`07` on such a gateway, run [`scripts/maintenance/mongodb-ssd-decommission.sh`](../scripts/maintenance/mongodb-ssd-decommission.sh). It is not a boot hook. Copy it to the gateway and execute it with Bash as root:
+
+```bash
+scp scripts/maintenance/mongodb-ssd-decommission.sh root@<gateway-ip>:/data/mongodb-ssd-decommission.sh
+ssh root@<gateway-ip> 'bash /data/mongodb-ssd-decommission.sh --decommission'
+```
+
+| Mode | Use | Refuses when | Deletes after a successful restart |
+|---|---|---|---|
+| `--decommission` | Network runs on PostgreSQL | the running app is not in PostgreSQL mode with a populated `unifi-network` database | old eMMC copy, SSD copy `unifi-db`, SSD dump `unifi-db-backup`, eMMC archive `db-backup` |
+| `--remove` | Remove the tweak on a MongoDB gateway (Network 10.x) | (no backend check) | old eMMC copy only. The SSD copy and the backups stay. |
+
+Both modes:
+
+1. Stop `unifi.service`, then `unifi-mongodb.service`. Abort if `mongod` does not exit in 30 s. Stopping `unifi` first also blocks the Network 11 on-demand `mongod`.
+2. Unmount the bind and pick the newest copy by `WiredTiger.turtle` mtime.
+3. If the SSD copy is newer, check eMMC free space, copy it to a staging dir on the eMMC, check the copy, then swap it in. The old eMMC copy is moved aside, not overwritten.
+4. Move `06`, `07` and the 07 cron to `/data/on_boot.d.disabled/mongodb-<timestamp>/`. Remove `/data/unifi-db-ssd/`.
+5. Start `unifi.service` and, for `--decommission`, confirm the PostgreSQL backend again.
+6. Delete as listed in the table.
+
+A failure in steps 1 to 4 restarts Network and deletes nothing. The last output line is `RESULT=ok ...` or `RESULT=error step=<n> reason="..."`, for tools such as Network Optimizer. Network is down for about 1 to 2 minutes, and the copy writes the MongoDB data to the eMMC once (550M on one production gateway).
 ## Results
 
 After moving MongoDB to SSD:

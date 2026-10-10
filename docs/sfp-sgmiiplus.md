@@ -48,6 +48,17 @@ reconfigured.
 
 Loading both modules simultaneously is **not currently supported**. Each module independently saves and restores the full polling loop port bitmap. The second module to load would save the first module's already-modified bitmap as "original," corrupting the restore state. Supporting dual-port SGMII+ requires coordinated bitmap manipulation (each module toggling only its own port bit) — tracked as future work.
 
+## SFP compatibility
+
+The module changes only the gateway side of the link. The SFP must switch its own host-side SerDes to 2.5G SGMII+ / HSGMII to match. If it stays at 1G, the gateway reports 2.5G but no traffic passes, or the port reverts to 1G.
+
+| SFP | Status | Notes |
+|---|---|---|
+| Calix 100-05609 | Works | |
+| LuLeey LL-XS2510 | Works | |
+| Zyxel PMG3000-D20B | Works on firmware V2.50+ | Older firmware has SFP PHY issues that the V2.50 lineage fixes |
+| ODI DFP-34X-2C2 / DFP-34X-2CY3 | Not supported | Auto-sensing cannot switch between SGMII and HiSGMII ([Hack GPON known bug](https://hack-gpon.org/ont-odi-realtek-dfp-34x-2c2/)). A stored HiSGMII `LAN_SDS_MODE` did not take effect at runtime on V1.7.1-231022 ([#3](https://github.com/Ozark-Connect/unifi-perf-tweaks/issues/3)) |
+
 ## Important caveats
 
 ### Port bitmap exclusion
@@ -93,8 +104,30 @@ The modules resolve private symbols from `qca-ssdk.ko` at load time. Their addre
 | 5.1.28 EA | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 5.1.29 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
 | 5.1.30 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
+| 5.1.31 | 5.4.213-ui-ipq9574 | deferred to live test¹ |
+| 6.0.5 EA | 5.4.213-ui-ipq9574 (rebuilt) | `ffffffc008934488` ² |
+| 6.0.10 | 5.4.213-ui-ipq9574 (rebuilt) | `ffffffc008934488` ³ |
 
-¹ The runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — was not captured for 5.1.26, 5.1.28, 5.1.29, or 5.1.30. 5.1.26 is **field-confirmed working on UCG-Fiber and UXG-Fiber**, and 5.1.28 on the UCG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — our UXG-Fiber tops out at 5.1.26. But that was operational use rather than an instrumented load test, so no `dmesg`/kallsyms was recorded; 5.1.29 and 5.1.30 are bench-verified only. In all four the kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28, 5.1.29, and 5.1.30 `.ko`s are byte-identical to 5.1.26's), so the symbol resolves identically; the address gets recorded whenever an instrumented load test is run. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md) / [compat-5.1.30.md](compat-5.1.30.md).
+¹ The runtime `adpt_hppe_uniphy_mode_set` address — a live kallsyms value — was not captured for 5.1.26, 5.1.28, 5.1.29, 5.1.30, or 5.1.31. 5.1.26 is **field-confirmed working on UCG-Fiber and UXG-Fiber**, and 5.1.28 on the UCG-Fiber (SGMII+ module + boot tweaks, user reports + our own gateways) — our UXG-Fiber had no 5.1.28 build offered to it, going 5.1.26 → 6.0.x. But that was operational use rather than an instrumented load test, so no `dmesg`/kallsyms was recorded; 5.1.29, 5.1.30, and 5.1.31 are bench-verified only. In all five the kernel is unchanged and `qca-ssdk.ko` is code-identical to 5.1.19/5.1.21 (`.text` byte-identical, all symbols and cache offsets intact; the 5.1.28, 5.1.29, 5.1.30, and 5.1.31 `.ko`s are byte-identical to 5.1.26's), so the symbol resolves identically; the address gets recorded whenever an instrumented load test is run. See [compat-5.1.26.md](compat-5.1.26.md) / [compat-5.1.28.md](compat-5.1.28.md) / [compat-5.1.29.md](compat-5.1.29.md) / [compat-5.1.30.md](compat-5.1.30.md) / [compat-5.1.31.md](compat-5.1.31.md).
+
+² **6.0.5 closes the kallsyms gap** — first live capture since 5.1.21, taken from a UXG-Fiber with the module loaded. All ten resolved:
+
+| Symbol | Address | Type |
+|---|---|---|
+| `adpt_hppe_uniphy_mode_set` | `ffffffc008934488` | t |
+| `_adpt_hppe_port_interface_mode_set` | `ffffffc00891fc08` | t |
+| `ssdk_dt_global_set_mac_mode` | `ffffffc0089dcfdc` | t |
+| `qca_ssdk_port_bmp_get` | `ffffffc0089713e0` | t |
+| `qca_ssdk_port_bmp_set` | `ffffffc0089713c0` | t |
+| `ssdk_phy_priv_data_get` | `ffffffc0089e1910` | t |
+| `ssdk_port_link_notify` | `ffffffc0089ade38` | t |
+| `ubnt_send_phy_event` | `ffffffc0089207a4` | t |
+| `ssdk_mac_sw_sync_work_stop` | `ffffffc0089e1948` | T |
+| `ssdk_mac_sw_sync_work_start` | `ffffffc0089e19a4` | T |
+
+Note 6.0.5 shifts these addresses (the kernel and `qca-ssdk.ko` were both rebuilt under the Debian 13 / GCC 14 rebase), which is exactly why the module resolves by name at runtime rather than hardcoding addresses. See [compat-6.0.5.md](compat-6.0.5.md).
+
+³ UXG-Fiber, live. All ten addresses are identical to the 6.0.5 table above. See [compat-6.0.10.md](compat-6.0.10.md).
 
 The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
 
