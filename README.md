@@ -16,7 +16,7 @@ After extended testing, JVM heap parameter tweaks showed minimal measurable impa
 
 The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
 
-Every script here runs on production gateways serving real users. Through Network Optimizer, these tweaks have run across a large fleet of UCG gateways for several months. This is not theoretical. The PostgreSQL scripts (`08`/`09`), added for Network 11.0.81, are newer and in testing.
+The established tuning scripts run on production gateways serving real users. Through Network Optimizer, these tweaks have run across a large fleet of UCG gateways for several months. This is not theoretical. The PostgreSQL scripts (`08`/`09`), added for Network 11.0.81, are newer and in testing. New opt-in experiments are marked **Testing** below; read their measured scope and deployment caveats before enabling them.
 
 Several of these tweaks are already available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer), which handles deployment, version tracking, and updates automatically. The scripts here are the upstream source — use them directly if you prefer manual control, or use Network Optimizer if you want a managed experience.
 
@@ -108,11 +108,14 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
 | [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
+| [`25-wan-fq-pacing.sh`](scripts/25-wan-fq-pacing.sh) | 25 | Opt-in, rate-free socket pacing for native WAN TCP; original GSO limits unchanged | UCG-Fiber | **Testing / opt-in** |
 
 > **SGMII+ (`19` / `20`):** Promoted from Testing to Stable — the modules have been running continuously on production UCG-Fiber and UXG-Fiber gateways for a couple months, across every UniFi OS release each model received from 5.1.15 through 6.0.5, including the 6.0.x Debian 13 rebase (no rebuild needed). Deploy **one script at a time**: loading both modules simultaneously is not supported (see the [port bitmap caveat](docs/sfp-sgmiiplus.md#port-bitmap-exclusion)).
 
 > **PostgreSQL SSD offload and backup (`08` / `09`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. `08` moves the Network app's PostgreSQL cluster (`14/apps`) to the SSD. `09` backs it up daily to the SSD and weekly to the eMMC. Both are in testing: field-verified on UCG-Fiber gateways (first migration, reboot, and a UniFi OS 6.0.10 to 6.0.11 upgrade while offloaded), not yet released through Network Optimizer. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) and [docs/postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md).
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
+
+> **WAN pacing (`25`):** Verified benefit is for gateway-native TCP on the tested PPP WAN, not a universal 550 Mbps fix. Accelerated wired forwarding largely bypassed the PPP queue. This separate loader does not change the SFP module or require a configured upload speed; see [deployment, evidence, and rollback](docs/sfp-sgmiiplus.md#opt-in-native-wan-tcp-pacing-testing).
 
 ### Boot Order
 
@@ -227,7 +230,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [mongodb-ssd-backup.md](docs/mongodb-ssd-backup.md) - backup schedule, failover strategy
 - [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - PostgreSQL SSD offload, installation, upgrade behavior and recovery
 - [postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md) - PostgreSQL backup schedule, globals coverage and off-device restore
-- [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
+- [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats; separate [opt-in native WAN pacing](docs/sfp-sgmiiplus.md#opt-in-native-wan-tcp-pacing-testing)
 
 ### Research
 
@@ -251,7 +254,7 @@ SFP+ port status check - reads the uniphy SerDes registers and clock rates for b
 ssh root@<gateway-ip> 'sh -s' < scripts/diagnostics/sfp-link-check.sh
 ```
 
-Reports the actual physical-layer speed by reading uniphy SerDes registers directly. Useful for confirming the SGMII+ module is working. With module v4+, `ethtool` and the UniFi UI also report 2500 Mbps correctly.
+Reports the actual physical-layer speed by reading uniphy SerDes registers directly. Useful for confirming the SGMII+ module is working; `ethtool` and the UniFi UI should also report 2500 Mbps correctly.
 
 ## Reverting
 
