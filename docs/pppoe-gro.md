@@ -152,7 +152,7 @@ docker run --rm -v "$PWD":/repo:ro -v ~/pppoe-gro-build:/out \
 # result: ~/pppoe-gro-build/pppoe_gro.ko and pppoe_gro.ko.sha256
 ```
 
-`build.sh` runs in a pinned `debian:trixie` image, checks out the CodeLinaro QSDK kernel at a pinned commit inside the container, applies `skbuff-layout-pad.patch` and builds with Debian's cross gcc 14.2.0-19, the compiler of the vendor kernel. Ubiquiti's `struct sk_buff` has two private fields the public tree lacks (8 bytes before `len`, 4 bytes before `protocol`). The patch adds placeholders so all offsets match the vendor kernel; this was verified against the running kernel's disassembly. With the same inputs the output is byte-identical (sha256 `2acd7a1b7921364a2460670d06c382a7f6772faf7e7508431f696da454567875` for the 6.0.11 config).
+`build.sh` runs in a pinned `debian:trixie` image, checks out the CodeLinaro QSDK kernel at a pinned commit inside the container, applies `skbuff-layout-pad.patch` and builds with Debian's cross gcc 14.2.0-19, the compiler of the vendor kernel. Ubiquiti's `struct sk_buff` has two private fields the public tree lacks (8 bytes before `len`, 4 bytes before `protocol`). The patch adds placeholders so all offsets match the vendor kernel; this was verified against the running kernel's disassembly. With the same inputs the output is byte-identical (sha256 `2acd7a1b7921364a2460670d06c382a7f6772faf7e7508431f696da454567875` for the 6.0.11 config). The image is pinned, but `build.sh` still installs the current trixie packages with `apt-get`; if Debian ships a newer cross gcc later, the script warns and the module is no longer byte-identical (it still builds against the same kernel tree).
 
 ## Credits
 
