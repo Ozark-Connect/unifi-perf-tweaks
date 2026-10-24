@@ -1,24 +1,31 @@
 #!/bin/bash
 # build.sh: build pppoe_gro.ko for the UCG-Fiber vendor kernel 5.4.213-ui-ipq9574.
 #
-# Run inside a debian:trixie container (cross gcc 14.2.0-19 = the vendor compiler):
-#   ssh root@<gateway-ip> 'zcat /proc/config.gz' > config
-#   docker run --rm -v "$PWD":/work debian:trixie bash /work/build.sh /work/config
-# Output: /work/out/pppoe_gro.ko plus its sha256 and vermagic.
+# Run from the repository root in a pinned debian:trixie container (cross gcc
+# 14.2.0-19 = the vendor compiler). The repository is mounted read-only; the
+# kernel checkout and build stay inside the container, only the result is
+# written to the directory that holds the config:
+#   mkdir -p ~/pppoe-gro-build
+#   ssh root@<gateway-ip> 'zcat /proc/config.gz' > ~/pppoe-gro-build/config
+#   docker run --rm -v "$PWD":/repo:ro -v ~/pppoe-gro-build:/out \
+#     debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 \
+#     bash /repo/modules/pppoe-gro/build.sh /out/config
+# Output: ~/pppoe-gro-build/pppoe_gro.ko and pppoe_gro.ko.sha256.
 #
 # The kernel tree is CodeLinaro qsdk_oss_kernel_linux-ipq-5.4 at a pinned commit
 # (NHSS.QSDK.12.4.r1, 5.4.213). Ubiquiti's sk_buff carries two private fields
 # that the public tree lacks; skbuff-layout-pad.patch adds placeholders so the
-# struct offsets match the vendor kernel. With the same inputs the build is
-# byte-for-byte reproducible.
+# struct offsets match the vendor kernel. With the same inputs (image, commit,
+# config) the build is byte-for-byte reproducible.
 set -euo pipefail
 
 CONFIG="${1:?usage: build.sh CONFIG (kernel config of the gateway)}"
+RESULT_DIR="$(cd "$(dirname "$CONFIG")" && pwd)"
 QSDK_REPO="https://github.com/CodeLinaro-mirror/qsdk_oss_kernel_linux-ipq-5.4.git"
 QSDK_COMMIT="8a567f8188c2174fec2ec9a2993fe30e5b50c61c"   # NHSS.QSDK.12.4.r1
 EXPECTED_GCC="14.2.0-19"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${WORK:-/work}"
+WORK="/work"   # inside the container; fixed so debug paths and the hash stay the same
 SRC="$WORK/qsdk-5.4"
 OUT="$WORK/out"
 
@@ -58,6 +65,7 @@ cp "$HERE/pppoe_gro.c" "$HERE/Makefile" "$OUT/"
 make -s -C "$SRC" M="$OUT" modules
 
 modinfo -F vermagic "$OUT/pppoe_gro.ko"
-sha256sum "$OUT/pppoe_gro.ko"
+cp "$OUT/pppoe_gro.ko" "$RESULT_DIR/pppoe_gro.ko"
+(cd "$RESULT_DIR" && sha256sum pppoe_gro.ko | tee pppoe_gro.ko.sha256)
 echo "Undefined symbols (must all exist in the running kernel):"
 aarch64-linux-gnu-nm -u "$OUT/pppoe_gro.ko" | awk '{print "  " $2}'

@@ -35,9 +35,9 @@
  * leave GSO_PARTIAL): a driver must not TSO a PPPoE frame.
  * Locally terminated PPPoE (the UCG-Fiber WAN case) never reaches this path.
  *
- * Status: v0.3 in production on a UCG-Fiber since 2026-10-24 (Telekom PPPoE
- * over VLAN 7, Smart Queues on). v0.4 adds gso_segment; test status and
- * measurements are in docs/pppoe-gro.md of unifi-perf-tweaks.
+ * Status: v0.4 in production on a UCG-Fiber since 2026-10-24 (v0.3 before;
+ * Telekom PPPoE over VLAN 7, Smart Queues on). The GSO path is untested; test
+ * status and measurements are in docs/pppoe-gro.md of unifi-perf-tweaks.
  */
 
 #include <linux/module.h>

@@ -25,7 +25,7 @@ The vendor `pppoe.ko` stays untouched. It exports QCA-specific symbols that SFE,
 
 ## Measurements
 
-UCG-Fiber, UniFi OS 6.0.11, Deutsche Telekom FTTH 1000/500 over PPPoE on VLAN 7, WAN on eth6 at 2.5G with the SGMII+ module, Smart Queues on with the HTB root at 898 Mbit nominal. Load from one wired client. A/B in the order with, without, without, with module, two runs per state, same load each time.
+UCG-Fiber, UniFi OS 6.0.11, Deutsche Telekom FTTH 1000/500 over PPPoE on VLAN 7, WAN on eth6 at 2.5G with the SGMII+ module, Smart Queues on with the HTB root at 898 Mbit nominal. Load from one wired client. A/B in the order with, without, without, with module, two runs per state, same load each time. This table was measured on 2026-10-24 with module v0.3; v0.4 has the same GRO code and only adds the GSO callback and uses cheaper per-CPU increments for the debug counters.
 
 | Load | Goodput without -> with | CPU %-points per 100 Mbit | RTT p95 to non-anycast hosts under load |
 |---|---|---|---|
@@ -36,7 +36,7 @@ UCG-Fiber, UniFi OS 6.0.11, Deutsche Telekom FTTH 1000/500 over PPPoE on VLAN 7,
 | Ookla (multi-flow) | 805 / 844 -> 858 / 881 Mbit/s | 39 -> 32 | 43 -> 26 ms |
 | QUIC download (HTTP/3) | 518 / 821 -> 683 / 783 Mbit/s | 39 -> 39 | 52 -> 46 ms |
 
-CPU at the same throughput (4 TCP flows, rate-limited below the shaper, Protect running on the gateway, same A/B order). Packet processing is the softirq time summed over the four cores (400 % = whole SoC); total CPU on a gateway with Protect varies too much between runs to show the difference at lower rates.
+CPU at the same throughput, measured on 2026-10-24 with v0.4 (4 TCP flows, rate-limited below the shaper, Protect running on the gateway, same A/B order). Packet processing is the softirq time summed over the four cores (400 % = whole SoC); total CPU on a gateway with Protect varies too much between runs to show the difference at lower rates.
 
 | Download rate | Packet processing without | with |
 |---|---|---|
@@ -73,7 +73,7 @@ HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers
 
 ### Tested so far
 
-Deployment and an orderly reboot on the test gateway: the boot script loaded the module about 5.5 minutes after boot, after waiting out a PPPoE reconnect caused by the SGMII+ script switching eth6 to 2.5G, and released the marker 10 minutes later. A reboot during the 10-minute hold cleared the marker as intended. A forced PPPoE reconnect (SIGHUP to pppd) under download load with the module loaded: new session after about 8 seconds, aggregation continued on the new session at full rate, no errors in the counters or kernel log. With Smart Queues off, ECM hands the flows to the PPE after their first packets, so the module only sees those (about 0.2 % of the traffic in the test) and gains nothing; IPv4 and IPv6 downloads with checksum verification showed no errors at the handover.
+All with v0.4 on 2026-10-24. Deployment and an orderly reboot on the test gateway: the boot script loaded the module about 5.5 minutes after boot, after waiting out a PPPoE reconnect caused by the SGMII+ script switching eth6 to 2.5G, and released the marker 10 minutes later. A reboot during the 10-minute hold cleared the marker as intended. A forced PPPoE reconnect (SIGHUP to pppd) under download load with the module loaded: new session after about 8 seconds, aggregation continued on the new session at full rate, no errors in the counters or kernel log. With Smart Queues off, ECM hands the flows to the PPE after their first packets, so the module only sees those (about 0.2 % of the traffic in the test) and gains nothing; IPv4 and IPv6 downloads with checksum verification showed no errors at the handover.
 
 ## Pre-check
 
@@ -128,6 +128,12 @@ ssh root@<gateway-ip> 'touch /data/pppoe-gro/disable'
 # or remove /data/on_boot.d/25-pppoe-gro.sh
 ```
 
+Reloading within 10 minutes of a load is refused because of `loading.marker`. After a manual `rmmod` (not after a crash) remove the marker first, then start the script again:
+
+```bash
+ssh root@<gateway-ip> 'rm /data/pppoe-gro/loading.marker; /data/on_boot.d/25-pppoe-gro.sh'
+```
+
 ## After a firmware update
 
 The firmware has no `CONFIG_MODVERSIONS`, so `vermagic` does not protect against a changed `struct sk_buff`. The module reads and writes `sk_buff` and `napi_gro_cb` fields directly; a layout change would corrupt memory. The script therefore refuses any build that is not listed in `VERIFIED_BUILDS` and logs the values it found.
@@ -137,11 +143,16 @@ To add a build: confirm that the functions touching these structs are unchanged,
 ## Building
 
 ```bash
-ssh root@<gateway-ip> 'zcat /proc/config.gz' > config
-docker run --rm -v "$PWD":/work debian:trixie bash /work/modules/pppoe-gro/build.sh /work/config
+mkdir -p ~/pppoe-gro-build
+ssh root@<gateway-ip> 'zcat /proc/config.gz' > ~/pppoe-gro-build/config
+# from the repository root; the repository is mounted read-only
+docker run --rm -v "$PWD":/repo:ro -v ~/pppoe-gro-build:/out \
+  debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 \
+  bash /repo/modules/pppoe-gro/build.sh /out/config
+# result: ~/pppoe-gro-build/pppoe_gro.ko and pppoe_gro.ko.sha256
 ```
 
-`build.sh` checks out the CodeLinaro QSDK kernel at a pinned commit, applies `skbuff-layout-pad.patch` and builds with Debian's cross gcc 14.2.0-19, the compiler of the vendor kernel. Ubiquiti's `struct sk_buff` has two private fields the public tree lacks (8 bytes before `len`, 4 bytes before `protocol`). The patch adds placeholders so all offsets match the vendor kernel; this was verified against the running kernel's disassembly. With the same inputs the output is byte-identical (sha256 `2acd7a1b7921364a2460670d06c382a7f6772faf7e7508431f696da454567875` for the 6.0.11 config).
+`build.sh` runs in a pinned `debian:trixie` image, checks out the CodeLinaro QSDK kernel at a pinned commit inside the container, applies `skbuff-layout-pad.patch` and builds with Debian's cross gcc 14.2.0-19, the compiler of the vendor kernel. Ubiquiti's `struct sk_buff` has two private fields the public tree lacks (8 bytes before `len`, 4 bytes before `protocol`). The patch adds placeholders so all offsets match the vendor kernel; this was verified against the running kernel's disassembly. With the same inputs the output is byte-identical (sha256 `2acd7a1b7921364a2460670d06c382a7f6772faf7e7508431f696da454567875` for the 6.0.11 config).
 
 ## Credits
 
