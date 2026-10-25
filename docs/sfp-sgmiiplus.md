@@ -19,17 +19,25 @@ The SGMII+ mode set requires kernel-level operations that can't be done from use
 
 ## What the modules do
 
-Both modules (uniphy1 for eth6, uniphy2 for eth5) follow the same sequence:
+Both modules save the SSDK state, exclude their target port from the MAC-sync
+bitmap, program SGMII+ mode, update the speed cache, and restore the saved
+state on unload.
 
-1. Saves the current port bitmap via `qca_ssdk_port_bmp_get()`, then stops the MAC sync polling loop briefly to prevent races during the mode change
-2. Excludes the target port from the polling loop's port bitmap via `qca_ssdk_port_bmp_set()` - the loop will skip the port entirely, preventing it from forcing the MAC to 1G
-3. Sets the target uniphy to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, uniphy_index, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
-4. Updates SSDK bookkeeping: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set()` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode()`
-5. Waits 1 second for the link to stabilize after the mode change, then restarts the polling loop - the loop now manages all other ports but skips the target port
-6. Writes 2500 to the SSDK SFP PHY speed cache (`ssdk_phy_priv_data` at offset 0x690), fires `ssdk_port_link_notify` and `ubnt_send_phy_event`, then triggers an async `RTM_NEWLINK` (transient interface alias set/clear) so `ubios-udapi-server` re-reads ethtool. This makes ethtool, sysfs, UDAPI, and UniFi Network all report 2.5G
-7. On unload (`rmmod`), restores the speed cache to its original value and reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap), then restarts the polling loop with the full port set
+The UniPHY1/eth6 module additionally makes the complete host-side transition:
 
-The mode set causes the target interface to flap briefly (~300ms) while the PLL relocks.
+1. It uses `adpt_hppe_port_interface_mode_set()` to force SGMII+, so an SFP
+   EEPROM event cannot silently restore the port to 1000BASE-X.
+2. It disables the MAC path, programs the UniPHY and APPE XGMAC path, then
+   brings the path back at 2500/full.
+3. A one-second monitor checks the physical mode, forced-interface flag,
+   XGMAC selection, global mode, and bitmap. On drift it quiesces the path,
+   repeats the vendor transition, and resynchronizes host link state from PCS.
+4. On unload it stops the monitor before restoring the original interface,
+   mode, cache, and bitmap state.
+
+The UniPHY2/eth5 module remains a one-shot transition. Loading or recovering
+the UniPHY1 module briefly flaps eth6 while the SerDes and MAC path are
+reconfigured.
 
 ### Port-to-module mapping
 
@@ -55,7 +63,7 @@ The module changes only the gateway side of the link. The SFP must switch its ow
 
 ### Port bitmap exclusion
 
-Each module removes its target port from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory - it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports for link state, speed/duplex sync, and flow control.
+Each module removes its target port from the SSDK's polling loop port bitmap. This is a runtime-only change to a value in kernel memory - it persists as long as the module is loaded and is restored on unload. The polling loop continues managing all other ports for link state, speed/duplex sync, and flow control. The UniPHY1 monitor also re-clears the eth6 bit if another SSDK path restores it.
 
 The bitmap exclusion is necessary because the loop reads link speed from a PPE hardware register that always reports 1000M for SGMII+ links (the SGMII in-band protocol has no 2.5G speed code). If the loop managed the port, it would force the MAC to 1G on every link-up event, creating a MAC/SerDes speed mismatch that kills the data path.
 
@@ -63,24 +71,25 @@ Default port bitmap is `0x62` (ports 1, 5, 6). The uniphy1 module clears bit 5 (
 
 ### SSDK bookkeeping
 
-Each module also writes to two SSDK internal data structures (per-port interface mode and per-uniphy mac_mode). These are the same structures the SSDK itself writes during normal port initialization - the module sets them to SGMII+ values so any SSDK code path that checks the port mode sees a consistent state.
-
-### Version history
-
-v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5/eth6 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 (current) adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. If you are running v1, v2, or v3, upgrade.
+Each module writes SSDK interface and global-mode state so readers see a
+consistent SGMII+ configuration. UniPHY1 uses the public interface-mode setter
+to retain the forced mode, programs the APPE MAC mux to XGMAC, and keeps the
+link, speed, and duplex caches synchronized from PCS rather than GPON RX_LOS.
 
 ### Symbol resolution
 
-The module resolves three symbols from `qca-ssdk.ko` at load time. Their addresses change across UniFi OS versions even though the kernel stays the same - Ubiquiti ships a different `qca-ssdk.ko` build with each release:
+The modules resolve private symbols from `qca-ssdk.ko` at load time. Their addresses can change across UniFi OS builds:
 
 | Symbol | Type | Resolution | Purpose |
 |---|---|---|---|
-| `adpt_hppe_uniphy_mode_set` | local (t) | kallsyms | Uniphy SerDes mode set |
-| `_adpt_hppe_port_interface_mode_set` | local (t) | kallsyms | Per-port interface mode bookkeeping |
-| `ssdk_dt_global_set_mac_mode` | local (t) | kallsyms | Per-uniphy global mac_mode bookkeeping |
+| `adpt_hppe_uniphy_mode_set` | local (t) | kallsyms | UniPHY SerDes mode set |
+| `adpt_hppe_port_interface_mode_set`, `_adpt_hppe_port_interface_mode_set`, `adpt_hppe_port_interface_mode_get` | local (t) | kallsyms | Forced interface mode and saved-mode restoration |
+| `ssdk_dt_global_get_mac_mode`, `ssdk_dt_global_set_mac_mode` | local (t) | kallsyms | Per-UniPHY global-mode state |
 | `qca_ssdk_port_bmp_get` | local (t) | kallsyms | Read polling loop port bitmap |
 | `qca_ssdk_port_bmp_set` | local (t) | kallsyms | Write polling loop port bitmap |
-| `ssdk_phy_priv_data_get` | local (t) | kallsyms | SSDK private data (SFP PHY speed cache) |
+| `adpt_hppe_port_mux_mac_type_set`, `qca_hppe_port_mac_type_get` | local (t) | kallsyms | APPE GMAC/XGMAC transition and verification |
+| `hppe_uniphy_channel0_input_output_6_get`, `hppe_uniphy_phy_mode_ctrl_get` | local (t) | kallsyms | PCS link and physical-mode reads |
+| `ssdk_phy_priv_data_get` | local (t) | kallsyms | SSDK link, speed, and duplex caches |
 | `ssdk_port_link_notify` | local (t) | kallsyms | Link state notifier chain |
 | `ubnt_send_phy_event` | local (t) | kallsyms | UniFi PHY event netlink notification |
 
@@ -126,7 +135,7 @@ After loading, confirm the symbols resolved:
 
 ```bash
 dmesg | grep force_sgmiiplus
-# "resolved all symbols via kallsyms" = good
+# "resolved symbols" = dependencies resolved
 # "lookup failed" = module refused to load
 ```
 
@@ -267,42 +276,194 @@ cat /var/log/sfp-sgmiiplus-eth5.log   # eth5
 dmesg | grep force_sgmiiplus
 ```
 
-### Boot-time retry
+### UniPHY1 boot and recovery
 
-The boot-time mode set does not always commit. `insmod` can succeed and the module
-can log `uniphy1 set to SGMII+ 2.5G` while the uniphy clock stays at 125 MHz and the
-port sits at NO-CARRIER against an SFP that has already switched to 2.5G. A set that
-*does* commit can still be reverted up to ~35s later when it happens early in boot.
-Which boots are affected is timing-dependent, so the same firmware and SFP can boot
-cleanly and fail on the next try.
+The eth6 loader waits for `qca_ssdk`, then performs exactly one `insmod`.
+Recovery stays in the module for its full lifetime: it can correct a later SFP
+event that rewrites physical or MAC state without repeatedly unloading a live
+WAN module. The loader requires the 312.5 MHz clock to remain stable for 15
+consecutive seconds within a 60-second window. If that check fails, it leaves
+the module loaded so the monitor can continue recovery.
 
-The scripts handle this themselves. After each `insmod` they require the clock to read
-312500000 Hz *and hold it for 45s* — a single read one second after load only proves a
-momentary state. On a mismatch the script `rmmod`s to restore stock SGMII 1G, waits up
-to 30s for the stock 1G link to recover, backs off, and retries; 5 attempts total.
+Expected recovery evidence after a late mode reset includes:
 
-Success is judged on the clock only, never on carrier, so SFPs that are hard-locked at
-2.5G and cannot establish a 1G link still work.
-
-If all five attempts fail, the module is removed and the port is left in stock SGMII 1G
-state — the WAN keeps working at 1G instead of staying dead — and the script logs an
-ERROR and exits non-zero:
-
-```
-WARNING: Attempt 1 expected 312500000 Hz, got 125000000 Hz
-Removing force_uniphy1_sgmiiplus to restore stock SGMII 1G before retry
-eth6 stock 1G carrier recovered after 2s
-Retrying after 5s backoff
-Loading force_uniphy1_sgmiiplus (attempt 2/5)...
-Clock rate after attempt 2: 312500000 Hz
-Clock reached 312500000 Hz; verifying it holds for 45s
-Verified: uniphy1 running at 312.5 MHz (SGMII+ 2.5G) and held for 45s
+```text
+mode drift detected: ...; reasserting SGMII+
+vendor mode transition complete: mode=0xc mac_type=2 speed=2500
+SGMII+ mode restored after drift
+PCS status ..., host link ...
 ```
 
-The retry is deliberately bounded: if something on the host actively re-asserts 1G, an
-unbounded loop would flap the WAN forever. Worst case the loop runs ~7 minutes after the
-initial carrier wait, bouncing the port up to five times. It runs in the background, so
-`on_boot.d` is never blocked.
+## Opt-in native WAN TCP pacing (testing)
+
+[`scripts/25-wan-fq-pacing.sh`](../scripts/25-wan-fq-pacing.sh) and its
+[`scripts/wan-fq-pacing.py`](../scripts/wan-fq-pacing.py) companion are a separate,
+optional userspace mitigation. **Installing the `25` script in
+`/data/on_boot.d/` opts in.** The existing `20-sfp-sgmiiplus.sh` loader and kernel
+module are unchanged; SGMII+ deployment alone does not enable pacing.
+
+### Measured scope, not a universal upload fix
+
+On the tested UCG-Fiber/PPP WAN, repeated identical gateway-native TCP tests
+with `fq` alone reached **491–494 Mbps at 34–35% CPU**. Also reducing the GSO
+segment limit to one reached about **466 Mbps at 44–46% CPU**; segment limits
+of two, four, and eight offered no advantage. This implementation therefore
+**leaves the original GSO limits untouched**.
+
+During 55 seconds of native upload, with an overlapping 25-second download,
+the original queue measured **301/1015 Mbps**, versus **442/1007 Mbps**
+with `fq`. Loaded ping p95 was about **9.5 ms**, with no ping loss; ONU drops
+remained. These are native TCP mitigation results, **not a verified 550 Mbps
+upload fix** and not evidence that every flow benefits.
+
+Wired tests measured 521 Mbps untouched versus 515 Mbps with `fq`, but used
+different Apple servers and are not a controlled throughput comparison. Only
+**0.22–0.23%** of wired-test bytes hit the `ppp0` qdisc, compared with **97–98%**
+for native traffic. That acceleration gap limits what a PPP software queue can
+do for forwarded wired traffic.
+
+Linux `fq` follows the socket's dynamically selected TCP pacing rate; there is
+**no upstream Mbps setting, fixed-rate shaper, or speed configuration**. The
+helper only manages the selected interface's root qdisc. It never changes GSO,
+MTU, offloads, ONU settings, or the SFP kernel module.
+
+### Prerequisites and interface selection
+
+Use root for start/stop and queue changes. The gateway needs Python 3 (standard
+library only), a running systemd with `systemd-run` and `Type=exec` support,
+`systemctl`, `flock`, `tc` (iproute2, for class/filter preflight), and kernel
+support for `fq`. Boot execution additionally
+requires [udm-boot](prerequisites.md). Missing prerequisites fail explicitly.
+
+The default interface is **`ppp0`**, not the physical SFP port `eth6`. Confirm
+your WAN's actual interface before installing. For another interface, change
+`INTERFACE="ppp0"` near the top of the deployed shell script; this makes the
+selection persistent at boot. Manual commands can instead pass
+`--interface NAME`, including to `--status` and `--stop`. There is no speed
+setting to edit. Stop the old configured watcher before changing this selection:
+an existing unit with a different interface or unexpected configuration is
+refused rather than silently reused or replaced.
+
+### Deploy and start manually
+
+Run these from your local checkout, after reviewing the scripts:
+
+```bash
+# Copy the companion first; it must remain available for crash/stop recovery.
+ssh root@<gateway-ip> "mkdir -p /data/wan-fq-pacing"
+scp scripts/wan-fq-pacing.py root@<gateway-ip>:/data/wan-fq-pacing/wan-fq-pacing.py
+
+# Adding this separate boot entry is the opt-in.
+scp scripts/25-wan-fq-pacing.sh root@<gateway-ip>:/data/on_boot.d/25-wan-fq-pacing.sh
+ssh root@<gateway-ip> "chmod +x /data/on_boot.d/25-wan-fq-pacing.sh"
+
+# Start without rebooting; returns after the watcher executable starts.
+ssh root@<gateway-ip> /data/on_boot.d/25-wan-fq-pacing.sh
+
+# Service configuration/state followed by read-only helper JSON.
+ssh root@<gateway-ip> /data/on_boot.d/25-wan-fq-pacing.sh --status
+ssh root@<gateway-ip> systemctl status wan-fq-pacing.service --no-pager
+ssh root@<gateway-ip> journalctl -u wan-fq-pacing.service --no-pager -n 30
+```
+
+The transient **`wan-fq-pacing.service`** runs
+`/data/wan-fq-pacing/wan-fq-pacing.py --watch --interface ppp0
+--state-directory /run/wan-fq-pacing` under Python 3. It is `Type=exec`, with a
+15-second stop timeout and an `ExecStopPost` command that runs the same helper's
+`--restore` for the same interface. `ExecStopPost` also recovers the owned queue
+after a watcher crash. There is **no automatic service restart, retry loop, or
+kernel reload**. Loader invocations are serialized; repeated invocation while
+the matching service is active does nothing and does not reset the queue.
+
+The helper's status JSON contains `current`, `state`, and `owns_queue`. An absent
+interface has `current: null`; when pacing is owned, the root is `fq` with handle
+`7f51:` (`0x7f510000`) and `owns_queue` is true. To obtain JSON alone, use:
+
+```bash
+ssh root@<gateway-ip> python3 /data/wan-fq-pacing/wan-fq-pacing.py \
+    --status --interface ppp0 --state-directory /run/wan-fq-pacing
+```
+
+The watcher waits if the interface is missing and listens for kernel link
+events, including PPP teardown/recreation. On reconnect it reconciles the new
+interface and saves that interface's own baseline before applying. It does not
+restore an old interface's snapshot onto a newly created interface. There is no
+periodic polling or recurring status log; inspect the service journal for
+transitions and errors. An active service alone does not prove it owns a queue:
+missing interfaces and pre-existing custom queues can legitimately leave
+`owns_queue` false.
+
+### Ownership and restoration limits
+
+Only a default **root `fq_codel` with handle zero and no classes or filters** is
+eligible. A pre-existing `fq` or custom root is left alone. The first apply saves
+the complete original root configuration in
+**`/run/wan-fq-pacing/ppp0.json`** (or `NAME.json` for another selected interface);
+repeated apply does not overwrite that baseline or reset an already owned queue.
+
+Restoration requires the same interface lifetime and the still-owned applied
+configuration. Lifetime checks combine the interface index with its sysfs
+device inode: the target kernel can reuse an index after interface recreation.
+A foreign replacement is preserved, including changed options on an `fq` queue
+that retains the same `7f51:` handle. Do not delete the `/run`
+state while pacing is active: without the saved baseline and ownership evidence,
+the helper cannot safely reconstruct the original queue. State is intentionally
+volatile and does not persist across reboot.
+
+Restoration restores **configuration**, not queued packets, queue statistics,
+or the historical state of TCP connections. Replacing a qdisc can discard
+queued packets. It is not a rollback of ONU drops or other WAN settings.
+
+Keep the kernel's global default qdisc policy unchanged while this helper is
+active. If removing the owned queue recreates a different default qdisc kind,
+exact handle-zero restoration is refused rather than guessing a replacement.
+
+### Validation
+
+The isolated Linux-root suite exercises real TAP interfaces and qdiscs without
+changing global policy or sending traffic through the live WAN:
+
+```bash
+python3 -B -m unittest discover -s tests -p 'test_wan_fq_pacing.py' -v
+```
+
+All **10 tests passed** on `5.4.213-ui-ipq9574`, covering repeated application,
+missing-interface startup, interface recreation, foreign queue preservation,
+normal shutdown, and recovery of an orphaned watcher.
+
+A live `ppp0` smoke run with this helper measured **496 Mbps native upload**.
+Three concurrent loader invocations retained the same watcher, baseline, and
+queue counters. A mismatched interface was rejected. Both normal service stop
+and a forced `SIGKILL` recovered the exact original queue through the watcher
+or `ExecStopPost`; GSO limits remained unchanged. Actual reboot execution was
+not tested.
+
+### Disable and roll back
+
+**Disable the boot entry first**, then stop the watcher and restore. Do not
+remove the Python helper or its state before stopping; both are needed for
+ownership-aware recovery.
+
+```bash
+# Move outside on_boot.d, so the boot runner cannot execute it again.
+ssh root@<gateway-ip> \
+    "mv /data/on_boot.d/25-wan-fq-pacing.sh /data/wan-fq-pacing/25-wan-fq-pacing.sh.disabled"
+
+# Stops the service, waits for ExecStopPost, then repeats restore safely.
+ssh root@<gateway-ip> /data/wan-fq-pacing/25-wan-fq-pacing.sh.disabled --stop
+ssh root@<gateway-ip> /data/wan-fq-pacing/25-wan-fq-pacing.sh.disabled --status
+
+# Explicit restore is also idempotent, after the watcher has stopped.
+ssh root@<gateway-ip> python3 /data/wan-fq-pacing/wan-fq-pacing.py \
+    --restore --interface ppp0 --state-directory /run/wan-fq-pacing
+```
+
+Use the original configured `--interface NAME` when stopping a non-default
+watcher. Repeating `--stop` or `--restore` is safe; neither overwrites a foreign
+queue. If ownership has been lost, a custom queue remaining in status is
+intentional, not a reason to force-delete it. These commands do not unload the
+SFP module; module rollback is independent and described below.
+
 
 ## Reverting
 
