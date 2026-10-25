@@ -61,8 +61,16 @@ Script 15 on this boot, against `ustd` 6.0.11:
 - **Reload:** `ufcd` `ActiveEnterTimestamp` is 1 s after the SDB write. `NRestarts=0`. `fan_ctrl_sm` mapped in `ufcd` (4).
 - **Actuator:** CPU 69.2 °C (tuned 65, stock 100). NVMe 55 °C (stock 68), rtl8372 68 °C (stock 109), rtl8261 83 °C (stock 103). Every component is below its stock setpoint, so stock config would hold the PWM 38 floor. Observed PWM 135-184 / 5,300-6,500 rpm. The tuned CPU setpoint is driving the fan loop on 6.0.15.
 
+## Long uptime
+
+Same UCG-Fiber, read-only SSH, 2026-10-25 16:36 UTC, 2 days 5 h 33 min after the 6.0.15 boot. `ustd` 6.0.11.
+
+- **Write:** SDB `config.fan` holds 65/55/85/90, standby 20. `read_default_config` did not revert it.
+- **Reload:** `ufcd` `ActiveEnterTimestamp` is unchanged from the boot-time reload, `NRestarts=0`. The script log has no later run.
+- **Actuator:** CPU 68.9 °C (tuned 65, stock 100). Every other component reads 55-63 °C, below its stock setpoint. Observed PWM 103 / 4,388 rpm, above the 38 floor. The fan speed time series shows the loop under control over the whole uptime.
+
 ## Outstanding
 
-- The `config.fan` read-back covers 59 s. A later read on a 6.0.15 gateway confirms whether the new `read_default_config` ever reverts the tuned values at runtime.
+None.
 
 Reference `.ko`: `research/qca-ssdk-compare/qca-ssdk-6.0.15.ko`. Working files: `~/fw-6015/` on the NAS. The kallsyms parser for this kernel and the per-function compare are in `~/tools-6015/`.
