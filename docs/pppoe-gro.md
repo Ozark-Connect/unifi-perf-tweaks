@@ -52,9 +52,9 @@ TCP aggregates average 6 segments with 2 flows and 4-5 with 8 flows, so more par
 
 ## Important caveats
 
-### Smart Queues rate is applied ~4 % higher
+### Smart Queues rate is applied 2-5 % higher
 
-HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers once instead of once per original segment. With the module, a given HTB rate lets roughly 4 % more IP traffic through (measured 1431 instead of ~1490 bytes per segment at about 6 segments per aggregate; the deviation grows with aggregate size). A Smart Queues rate tuned without the module ends up closer to the line rate with it. Rates read from `ppp0` counters are low by the same amount; `eth6` counters are correct.
+HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers once instead of once per original segment. With the module, a given HTB rate lets more IP traffic through than configured. Measured on 2026-10-25 in steady state against the `eth6` counters: about 2 % for bulk TCP downloads (HTB counts 1465 bytes per 1492-byte segment; HTB 898 Mbit/s passed about 905 Mbit/s of IP), and 4.5-5 % for Ookla-style speed tests (1431 bytes per segment). A Smart Queues rate tuned without the module ends up closer to the line rate with it. Rates read from `ppp0` counters are low by a similar amount; `eth6` counters are correct.
 
 ### Counters and captures see aggregates
 
