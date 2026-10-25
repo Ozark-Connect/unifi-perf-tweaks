@@ -52,9 +52,9 @@ TCP aggregates average 6 segments with 2 flows and 4-5 with 8 flows, so more par
 
 ## Important caveats
 
-### Smart Queues rate is applied 1.5-5 % higher
+### Smart Queues rate is applied 2-4 % higher
 
-HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers once instead of once per original segment. With the module, a given HTB rate lets more IP traffic through than it counts. Measured on 2026-10-25 with the HTB root at 898 Mbit/s, comparing the HTB class counters with the IP rate estimated from the `eth6` counters (assuming 26-30 bytes of overhead per frame; `eth6` averages 1519-1520 bytes per frame): in steady state with 4 and 8 bulk TCP flows HTB counted 887-891 Mbit/s while an estimated 900-908 Mbit/s of IP passed, about 1.5-2 % more (HTB averaged 1465-1468 bytes per counted packet). In two Ookla runs the difference was 4-5 % (1431.5 and 1380.0 bytes per counted packet). A Smart Queues rate tuned without the module ends up closer to the line rate with it. Rates read from `ppp0` counters are low by a similar amount.
+HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers once instead of once per original segment. With the module, a given HTB rate lets more IP traffic through than it counts, and more for IPv6 than for IPv4. Measured on 2026-10-25 with 4 bulk TCP flows and the HTB root at 890 Mbit/s, 4 runs per protocol, comparing the bytes per counted segment in the HTB counters with the IP bytes per frame on `eth6` (assuming 26 bytes of overhead per frame): IPv4 TCP passed 1.9 % more than HTB counted (1464-1466 against 1491-1493 bytes), IPv6 TCP 4.2 % more (1432-1433 against 1493 bytes). Earlier runs at 898 Mbit/s agree: 1.5-2 % for IPv4 bulk TCP and 4-5 % for Ookla, which ran over IPv6. How far a Smart Queues rate tuned without the module moves toward the line rate depends on the IPv6 share of the traffic. Rates read from `ppp0` counters are low by a similar amount.
 
 ### Counters and captures see aggregates
 
