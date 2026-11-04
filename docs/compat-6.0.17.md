@@ -1,6 +1,6 @@
 # UniFi OS 6.0.17 Compatibility Verification
 
-**Result: compatible on UCG-Fiber, UXG-Fiber and UXG-Max.** Static checks of each model's own image: UCG-Fiber on 2026-11-03, UXG-Fiber and UXG-Max on 2026-11-04. No live check.
+**Result: compatible on UCG-Fiber, UXG-Fiber and UXG-Max.** Static checks of each model's own image: UCG-Fiber on 2026-11-03, UXG-Fiber and UXG-Max on 2026-11-04. Live check on a production UXG-Fiber on 2026-11-04.
 
 - [UCG-Fiber](#ucg-fiber)
 - [UXG-Fiber](#uxg-fiber)
@@ -103,6 +103,18 @@ The image has 360 modules. 352 are byte-identical to UCG-Fiber 6.0.17, including
 Every package common to both images has the same version as on the UCG-Fiber. The UXG-Fiber has 10 platform packages of its own and no Network application.
 
 Compared with the UCG-Fiber, `syslog-ng/conf.d/` adds `wan-diag.conf` with five local `file("/var/log/...")` routes. The file was present on 5.1.26 and 6.0.5. Script 10 finds routes by the `destination ... file("/var/log` pattern, so it disables these too.
+
+### Live check
+
+Read-only, on a production UXG-Fiber upgraded from 6.0.10. It booted 6.0.17 at 18:52:24 UTC. The running build matches the image above. The deployed scripts 10 and 15 are byte-identical to repo HEAD, and `udm-boot` finished with status 0.
+
+| Tweak | Live (UXG-Fiber) |
+|---|---|
+| 20 SGMII+ (uniphy1, `eth6`) | ✓ Loaded at 18:55:06 UTC by the gateway's SFP management script, which loads it once the WAN is reachable, in place of script 20. Module md5 `bbd0a2c9…` (repo artifact). Full dmesg sequence: symbols resolved, port bitmap `0x62` → `0x42`, uniphy1 SGMII+ 2.5G, speed cache 1000 → 2500. `eth6` 2500Mb/s, uniphy1 clock 312.5 MHz, SerDes `0x07A10218` = `0x00000050`. `adpt_hppe_uniphy_mode_set` at `ffffffc008934488`, as on 6.0.5 and 6.0.10. No rx, tx or CRC errors |
+| 19 SGMII+ (uniphy2, `eth5`) | Not tested |
+| 10 journald | ✓ `Storage=volatile`, `ForwardToSyslog=no`. 7.2M in `/run/log/journal`, 4K in `/var/log/journal`. Local routes commented out. In `wan-diag.conf`, which the gateway regenerates at runtime, four `/var/log` routes are commented out and the fifth writes to `/dev/null` |
+| 15 fan | ✓ The upgrade reset SDB `config.fan` to stock (100/109/103). Script 15 applied 65/85/90 at 18:55:17 UTC. `ufcd` restarted at 18:55:18, after the write. `fan_ctrl_sm` maps = 4. Actuator inconclusive: the hottest sensor read 64.3 °C, below the 65 °C setpoint, so PWM stayed at the 38 floor |
+| 06 to 09 | N/A |
 
 ## UXG-Max
 
