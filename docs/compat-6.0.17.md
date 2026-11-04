@@ -1,6 +1,12 @@
 # UniFi OS 6.0.17 Compatibility Verification
 
-**Result: compatible.** Static check of the UCG-Fiber image on 2026-11-03. No live check.
+**Result: compatible on UCG-Fiber, UXG-Fiber and UXG-Max.** Static checks of each model's own image: UCG-Fiber on 2026-11-03, UXG-Fiber and UXG-Max on 2026-11-04. No live check.
+
+- [UCG-Fiber](#ucg-fiber)
+- [UXG-Fiber](#uxg-fiber)
+- [UXG-Max](#uxg-max)
+
+## UCG-Fiber
 
 | | |
 |---|---|
@@ -20,7 +26,7 @@
 | 10 journald | ✓ `journald.conf` and `syslog-ng/` identical to 6.0.16 |
 | 15 fan | ✓ `ustd` unchanged (6.0.11). `ufcd.service` identical. `ufcd`, `uhwd`, `usdbd`, all `statusdb` modules, `fan_ctrl.so` and `fan_ctrl_sm.so` `.text`-identical to 6.0.16 |
 
-## Kernel
+### Kernel
 
 The decompressed kernel `Image` is the same size as 6.0.16 (13,395,976 bytes), and the symbol set is identical (36,164 entries). The per-function kallsyms compare finds two changed functions. Every other difference is the resulting address shift.
 
@@ -31,7 +37,7 @@ The decompressed kernel `Image` is the same size as 6.0.16 (13,395,976 bytes), a
 
 This is the backport of upstream `e3f33b0a1d89` ("ipv4: free inet_opt and ireq_opt after an RCU grace period"), the fix for CVE-2026-98432. It closes a use-after-free where a retransmitted SYN builds a SYN-ACK from IP options that another CPU frees. Neither function is on a tweak path.
 
-## Device tree: new UCG-Fiber v2 configuration
+### Device tree: new UCG-Fiber v2 configuration
 
 The FIT adds `fdt-2` ("ipq9574 ucgfiber v2") and a configuration `ucgfiber-2`, now the default. `fdt-1` is byte-identical to 6.0.16, and `ucgfiber-1` is still present. `fdt-2` differs from `fdt-1` in one node:
 
@@ -42,7 +48,7 @@ The FIT adds `fdt-2` ("ipq9574 ucgfiber v2") and a configuration `ucgfiber-2`, n
 
 The uniphy, SFP and switch nodes are identical, so the SGMII+ modules apply to v2 hardware unchanged. `dtb_combined.bin` (bootloader) is byte-identical to 6.0.16.
 
-## Modules
+### Modules
 
 Same 362-module set as 6.0.16. 360 are byte-identical, including `qca-ssdk.ko` (md5 `e4fd1d4e360a0c4ceaf74598dbda3114`) and `ubnthal.ko`. The symbols and the `0x690`/`0x6d0` cache offsets are intact by construction.
 
@@ -50,7 +56,7 @@ The two changed modules are the PoE driver (`kmod-poe-driver` 0.3.3-11 → 0.3.3
 - `udx_poe_rtl.ko`: code change. It adds RTL8238C and RTL8233C chip data, firmware `rtl8238c.bin`, and a chip-set read (`rtl_get_chip_set`) that selects the chip data when `ui,rtl-fw-by-chip-set` is set.
 - `udx_poe_class.ko`: only the embedded Jenkins source path changed.
 
-## Userland
+### Userland
 
 Same 583 packages as 6.0.16, none added or removed. 10 packages changed version. None of `python3`, `systemd`, `syslog-ng`, `mongod`, PostgreSQL or `ustd` changed.
 
@@ -69,3 +75,57 @@ Same 583 packages as 6.0.16, none added or removed. 10 packages changed version.
 The unit files and `/etc/cron.d` are identical to 6.0.16. The ramdisk differs only in `mdadm.conf` (generation timestamp) and `ubnt-tools`.
 
 No new reference `.ko` (byte-identical to `research/qca-ssdk-compare/qca-ssdk-6.0.15.ko`). Working files: `~/fw-6017/` on the NAS. Section compares use `~/tools-6017/secdiff.sh`, which writes `objcopy` output to a temp file: `objcopy -O binary ... /dev/stdout` in a pipe produces 0 bytes.
+
+## UXG-Fiber
+
+| | |
+|---|---|
+| Build | `UXGA6AA.ipq9574.v6.0.17.7bcad58.261103.1606` |
+| `.bin` md5 | `d64d09431cc7288905afe86c4678fef2` (355,984,879 bytes), matches the published `.md5sum` |
+| Rootfs | zstd squashfs at offset `16058386`, 22,643 inodes |
+| Kernel | `#5.4.213 SMP PREEMPT Tue Nov 3 16:08:01 CST 2026`, GCC 14.2.0-19 |
+| vermagic | `5.4.213-ui-ipq9574 SMP preempt mod_unload aarch64`, unchanged. No module rebuild. |
+| Baseline | UCG-Fiber 6.0.17 image (same release). UXG-Fiber 6.0.5 image for the device tree and `syslog-ng/` |
+
+| Tweak | Static (UXG-Fiber image) |
+|---|---|
+| 19 + 20 SGMII+ | ✓ `qca-ssdk.ko` byte-identical to UCG-Fiber 6.0.17 (`e4fd1d4e…`). Device tree byte-identical to UXG-Fiber 6.0.5, where SGMII+ ran live |
+| 06 + 07 MongoDB | N/A. No `mongod`. The scripts exit at their model check |
+| 08 + 09 PostgreSQL | N/A. No PostgreSQL `14-apps` cluster. The scripts exit at their model check |
+| `mongodb-ssd-decommission.sh` | N/A, as 06 to 09 |
+| 10 journald | ✓ `journald.conf` identical to UCG-Fiber 6.0.17. `syslog-ng/` identical to UXG-Fiber 6.0.5 |
+| 15 fan | ✓ `ufcd`, `uhwd` and `ufcd.service` byte-identical to UCG-Fiber 6.0.17. All `statusdb` modules `.text`-identical |
+
+The kernel `Image` is the same size as the UCG-Fiber 6.0.17 `Image` and differs in 42 bytes: the two version banners, the build-id and three initramfs mtimes. The kernel code, including the CVE-2026-98432 fix, is the same as on the UCG-Fiber.
+
+The image has 360 modules. 352 are byte-identical to UCG-Fiber 6.0.17, including `qca-ssdk.ko`, `qca-nss-dp.ko` and `ubnthal.ko`. Seven differ only in an embedded Jenkins build path (`UCGF` → `UXGFIBER`). The UXG-Fiber adds `gpiodev.ko` and has no `st7735fb.ko`, `ui-hdd-pwrctl.ko` or `ui_st_accel.ko`, as on 6.0.5.
+
+Every package common to both images has the same version as on the UCG-Fiber. The UXG-Fiber has 10 platform packages of its own and no Network application.
+
+Compared with the UCG-Fiber, `syslog-ng/conf.d/` adds `wan-diag.conf` with five local `file("/var/log/...")` routes. The file was present on 5.1.26 and 6.0.5. Script 10 finds routes by the `destination ... file("/var/log` pattern, so it disables these too.
+
+## UXG-Max
+
+| | |
+|---|---|
+| Build | `UXGB.ipq5322.v6.0.17.7bcad58.261103.1606` |
+| `.bin` md5 | `669697ce10374823544f4642949a899c` (339,999,937 bytes), matches the published `.md5sum` |
+| Rootfs | zstd squashfs at offset `15748510`, 22,096 inodes |
+| Kernel | `5.4.213-ui-ipq5322`, `#5.4.213 SMP PREEMPT Tue Nov 3 16:08:01 CST 2026`, GCC 14.2.0-19 |
+| SoC | IPQ5322. The FIT has three device trees (`uxg-v1`, `uxg-v2`, `uxg-v3`), default `uxg-v3` |
+| Baseline | UXG-Fiber 6.0.17 image (same release). This is the first UXG-Max round, so there is no earlier UXG-Max image |
+
+| Tweak | Static (UXG-Max image) |
+|---|---|
+| 19 + 20 SGMII+ | N/A. The modules are built for `5.4.213-ui-ipq9574` and do not load on the `ipq5322` kernel |
+| 06 + 07 MongoDB | N/A. No `mongod`. The scripts exit at their model check |
+| 08 + 09 PostgreSQL | N/A. No PostgreSQL `14-apps` cluster. The scripts exit at their model check |
+| `mongodb-ssd-decommission.sh` | N/A, as 06 to 09 |
+| 10 journald | ✓ `journald.conf` identical to UXG-Fiber 6.0.17. `syslog-ng/` identical except that `vpn_bonding_log.conf` is absent |
+| 15 fan | ✓ `ufcd`, `uhwd`, `ufcd.service` and all 109 `ustd` `.so` files byte-identical to UXG-Fiber 6.0.17 |
+
+Every package common to the UXG-Max and UXG-Fiber images has the same version. The differences are the SoC packages (`ipq5322` vs `ipq9574` kernel, SSDK and NSS) and the board packages.
+
+Script 15 changes only the PID categories that exist in the SDB `config.fan`, and the image does not show which categories the UXG-Max has. No UXG-Max stock setpoints are on record.
+
+Working files: `~/fw-6017-uxgf/` and `~/fw-6017-uxgmax/` on the NAS.
