@@ -16,7 +16,7 @@ After extended testing, JVM heap parameter tweaks showed minimal measurable impa
 
 The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
 
-Every script here runs on production gateways serving real users. Through Network Optimizer, these tweaks have run across a large fleet of UCG gateways for several months. This is not theoretical. The PostgreSQL scripts (`08`/`09`), added for Network 11.0.81, are newer and in testing.
+Every script here runs on production gateways serving real users. Through Network Optimizer, these tweaks have run across a large fleet of UCG gateways for several months. This is not theoretical. The PostgreSQL scripts (`08`/`09`), added for Network 11.0.81, are newer and in testing. `30` (IPv6 prefix deprecation) is not part of Network Optimizer and is in testing on one UCG-Fiber.
 
 Several of these tweaks are already available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer), which handles deployment, version tracking, and updates automatically. The scripts here are the upstream source — use them directly if you prefer manual control, or use Network Optimizer if you want a managed experience.
 
@@ -48,7 +48,7 @@ If you're not comfortable SSH-ing into your gateway and recovering from a bad bo
 
 ## Tested Platform
 
-**All scripts were developed and tested on the UCG-Fiber, and the scripts that do not need an SSD also on the UXG-Fiber.** Through Network Optimizer they run across a large fleet of these gateways. They should work on other UniFi Cloud Gateway and UDM-Pro based devices, but have **not been verified** on those platforms.
+**All scripts were developed and tested on the UCG-Fiber, and the scripts that do not need an SSD also on the UXG-Fiber (except `30`, tested on the UCG-Fiber only).** Through Network Optimizer they run across a large fleet of these gateways. They should work on other UniFi Cloud Gateway and UDM-Pro based devices, but have **not been verified** on those platforms.
 
 ### Verified UniFi OS versions (UCG-Fiber / UXG-Fiber)
 
@@ -114,7 +114,7 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 
 > **PostgreSQL SSD offload and backup (`08` / `09`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. `08` moves the Network app's PostgreSQL cluster (`14/apps`) to the SSD. `09` backs it up daily to the SSD and weekly to the eMMC. Both are in testing: field-verified on UCG-Fiber gateways (first migration, reboot, and a UniFi OS 6.0.10 to 6.0.11 upgrade while offloaded), not yet released through Network Optimizer. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) and [docs/postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md).
 
-> **IPv6 prefix deprecation (`30`):** For ISPs that delegate a new IPv6 prefix on every session, typically PPPoE. UniFi OS does not tell LAN clients that the old prefix is gone, so they keep using it until its preferred lifetime runs out (30 minutes with Telekom) and IPv6 fails meanwhile. `30` runs a small daemon that advertises the old prefix as deprecated within seconds. In testing on one UCG-Fiber; see [docs/ipv6-prefix-deprecation.md](docs/ipv6-prefix-deprecation.md).
+> **IPv6 prefix deprecation (`30`):** For ISPs that delegate a new IPv6 prefix on every session, typically PPPoE. In tests with Telekom PPPoE, UniFi OS did not tell LAN clients that the old prefix was gone, so they kept using it until its preferred lifetime ran out (30 minutes with Telekom) and IPv6 failed meanwhile. `30` runs a small daemon that advertises the old prefix as deprecated within seconds. In testing on one UCG-Fiber; see [docs/ipv6-prefix-deprecation.md](docs/ipv6-prefix-deprecation.md).
 
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
 

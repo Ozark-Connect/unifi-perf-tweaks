@@ -31,7 +31,7 @@ It never changes addresses, routes or the UniFi configuration. It only sends whi
 | `/etc/systemd/system/ipv6-prefix-deprecation.service` | unit, checked on every boot and rewritten when missing or changed |
 | `/run/ipv6-prefix-deprecation/status.json` | current state, RAM only |
 
-While nothing changes, the daemon runs one `ip -j -6 addr show` every 3 seconds and writes `state.json` only once the renewed lifetime has moved on by more than an hour since the last write (every 75 to 90 minutes with renewals every 15 to 30 minutes).
+While nothing changes, the daemon runs one `ip -j -6 addr show` every 3 seconds and writes `state.json` only once the renewed lifetime has moved on by more than an hour since the last write (every 75 to 90 minutes with renewals every 15 to 30 minutes). On the UCG-Fiber this took about 115 ms of CPU time per minute including the `ip` calls, about 0.2 % of one core. It writes to the journal only when something changes.
 
 ## Install
 
@@ -62,14 +62,25 @@ On a UCG-Fiber with Telekom FTTH (PPPoE, new /56 on every session), three LAN ne
 
 | Event | Date, UniFi OS | Deprecation after the new prefix |
 |---|---|---|
-| `kill -HUP` on pppd | 2026-11-06, 6.0.17 | about 5 s |
+| `kill -HUP` on pppd | 2026-11-06, 6.0.17 | about 8 s |
 | `ip link set ppp0 down` | 2026-11-01, 6.0.16 | about 3 s |
 | Fiber pulled for 90 s | 2026-11-01, 6.0.16 | about 3 s |
 | Reboot | 2026-11-01, 6.0.16 | about 7 s |
 
-The delay depends on the duplicate address detection of the new address, where the 3-second poll falls, and the second confirming snapshot. These four runs fell between 3 and 7 seconds.
+The `kill -HUP` run used the current daemon. The runs on November 1 used an earlier version without the fix for an old prefix that lingers next to its successor. The delay depends on the duplicate address detection of the new address, where the 3-second poll falls, and the second confirming snapshot. These four runs fell between 3 and 8 seconds.
 
 macOS and Ubuntu (NetworkManager) marked the old addresses deprecated and used the new prefix without reconnecting to the network. Without the script, macOS kept the old prefix preferred and connections from it timed out. After the reboot, IPv6 from the LAN still took about 2 to 3.5 minutes to work, also from the new prefix. I haven't looked into that delay; the deprecation itself went out on time.
+
+## Firmware Dependencies
+
+After a firmware update, these are the parts the script relies on:
+
+- `python3` in the firmware (3.13 on UniFi OS 6.0.17).
+- The dnsmasq configuration in `/run/dnsmasq.dhcp.conf.d/*.conf`, with `dhcp-range=...,constructor:<bridge>,ra-only,...` and `ra-param=<bridge>,...` for SLAAC networks.
+- The delegated prefixes as dynamic global /64 addresses on the LAN bridges, shown by `ip -j -6 addr show`.
+- dnsmasq running under the process name `dnsmasq`.
+
+If one of them changes, the daemon finds no networks or prefixes to track and sends nothing.
 
 ## Limitations
 

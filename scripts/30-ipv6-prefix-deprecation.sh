@@ -24,6 +24,7 @@ LOG_TAG="ipv6-prefix-deprecation"
 DIR="/data/ipv6-prefix-deprecation"
 DAEMON="$DIR/ipv6-prefix-deprecation.py"
 UNIT="/etc/systemd/system/ipv6-prefix-deprecation.service"
+PENDING="/run/ipv6-prefix-deprecation-install.restart-pending"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
@@ -595,23 +596,31 @@ EOF
     exit 1
 fi
 
-if [ -n "$UNIT_CHANGED" ] && ! systemctl daemon-reload; then
-    log "systemctl daemon-reload failed."
+# A changed file needs a reload and restart. Remember that on tmpfs until it succeeded, so
+# a rerun after a failure below doesn't find the files unchanged and leave the old daemon
+# running. A reboot starts the new files anyway, so the marker may vanish with /run.
+if [ -n "$DAEMON_CHANGED$UNIT_CHANGED" ] && ! : > "$PENDING"; then
+    log "Writing $PENDING failed."
     exit 1
+fi
+if [ -f "$PENDING" ]; then
+    ACTION=restart
+    if ! systemctl daemon-reload; then
+        log "systemctl daemon-reload failed."
+        exit 1
+    fi
+else
+    ACTION=start
 fi
 if ! systemctl enable ipv6-prefix-deprecation >/dev/null 2>&1; then
     log "Enabling the service failed."
     exit 1
 fi
-if [ -n "$DAEMON_CHANGED$UNIT_CHANGED" ]; then
-    ACTION=restart
-else
-    ACTION=start
-fi
 if ! systemctl "$ACTION" ipv6-prefix-deprecation; then
     log "systemctl $ACTION failed: $(journalctl -u ipv6-prefix-deprecation -n 3 -o cat --no-pager 2>/dev/null | tr '\n' ' ')"
     exit 1
 fi
+rm -f "$PENDING"
 
 sleep 2
 if systemctl is-active --quiet ipv6-prefix-deprecation; then

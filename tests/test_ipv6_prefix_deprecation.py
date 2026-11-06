@@ -1,4 +1,4 @@
-"""Tests for the daemon payload embedded in scripts/30-ipv6-prefix-deprecation.sh.
+"""Tests for the boot script and the daemon payload embedded in scripts/30-ipv6-prefix-deprecation.sh.
 
 Run: python3 tests/test_ipv6_prefix_deprecation.py [path to 30-ipv6-prefix-deprecation.sh]
 The payload is extracted from the boot script's PYEOF heredoc, so this tests exactly what ships.
@@ -324,6 +324,71 @@ class TrackerFlow(unittest.TestCase):
             valid = 14400
             self.step(snap(addr("2001:db8:0:100::1", valid=valid)), dt=0)
             self.assertEqual(self.t.dirty, renewal * 900 > d.EXPIRY_WRITE_STEP_S, renewal)
+
+class Installer(unittest.TestCase):
+    """Runs the boot script's shell part with systemctl mocked and paths moved to a temp dir."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        for sub in ("data", "etc", "run", "bin"):
+            os.mkdir(os.path.join(self.tmp, sub))
+        self.log = os.path.join(self.tmp, "systemctl.log")
+        mocks = {
+            "systemctl": '#!/bin/sh\necho "$*" >> "%s"\n[ "$1" = "$FAIL" ] && exit 1\nexit 0\n' % self.log,
+            "journalctl": "#!/bin/sh\nexit 0\n",
+            "sleep": "#!/bin/sh\nexit 0\n",
+        }
+        for name, body in mocks.items():
+            path = os.path.join(self.tmp, "bin", name)
+            with open(path, "w") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+        self.base = (open(SCRIPT).read()
+                     .replace("/data/", self.tmp + "/data/")
+                     .replace("/etc/systemd/system/", self.tmp + "/etc/")
+                     .replace("/run/", self.tmp + "/run/"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def run_script(self, text, fail=""):
+        import subprocess
+        path = os.path.join(self.tmp, "boot.sh")
+        with open(path, "w") as f:
+            f.write(text)
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        env = dict(os.environ, PATH=os.path.join(self.tmp, "bin") + ":" + os.environ["PATH"], FAIL=fail)
+        rc = subprocess.run(["bash", path], env=env, capture_output=True).returncode
+        calls = open(self.log).read().split("\n") if os.path.exists(self.log) else []
+        return rc, calls
+
+    def pending(self):
+        return os.path.exists(os.path.join(self.tmp, "run", "ipv6-prefix-deprecation-install.restart-pending"))
+
+    def test_failed_restart_is_retried_on_rerun(self):
+        rc, calls = self.run_script(self.base)
+        self.assertEqual(rc, 0)
+        self.assertIn("restart ipv6-prefix-deprecation", calls)
+        self.assertFalse(self.pending())
+
+        updated = self.base.replace("\nPYEOF\n", "\n# changed\nPYEOF\n", 1)
+        rc, calls = self.run_script(updated, fail="restart")
+        self.assertEqual(rc, 1)
+
+        rc, calls = self.run_script(updated)
+        self.assertEqual(rc, 0)
+        self.assertIn("daemon-reload", calls)
+        self.assertIn("restart ipv6-prefix-deprecation", calls)
+        self.assertFalse(self.pending())
+
+        rc, calls = self.run_script(updated)
+        self.assertEqual(rc, 0)
+        self.assertIn("start ipv6-prefix-deprecation", calls)
+        self.assertNotIn("daemon-reload", calls)
+
 
 if __name__ == "__main__":
     unittest.main()
