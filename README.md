@@ -16,7 +16,7 @@ After extended testing, JVM heap parameter tweaks showed minimal measurable impa
 
 The fan controller reverse engineering involved tearing down the `uhwd` PID control loop, mapping the SDB API, and measuring PWM-to-RPM curves to replace the constant-polling scripts that were themselves contributing to eMMC write pressure.
 
-Every script here runs on production gateways serving real users. Through Network Optimizer, these tweaks have run across a large fleet of UCG gateways for several months. This is not theoretical. The PostgreSQL scripts (`08`/`09`), added for Network 11.0.81, are newer and in testing.
+Every script here runs on production gateways serving real users. Through Network Optimizer, these tweaks have run across a large fleet of UCG gateways for several months. This is not theoretical. The PostgreSQL scripts (`08`/`09`), added for Network 11.0.81, are newer and in testing. `30` (IPv6 prefix deprecation) is not part of Network Optimizer and is in testing on one UCG-Fiber.
 
 Several of these tweaks are already available as one-click deployments through [Network Optimizer](https://github.com/Ozark-Connect/NetworkOptimizer), which handles deployment, version tracking, and updates automatically. The scripts here are the upstream source — use them directly if you prefer manual control, or use Network Optimizer if you want a managed experience.
 
@@ -48,7 +48,7 @@ If you're not comfortable SSH-ing into your gateway and recovering from a bad bo
 
 ## Tested Platform
 
-**All scripts were developed and tested on the UCG-Fiber, and the scripts that do not need an SSD also on the UXG-Fiber.** Through Network Optimizer they run across a large fleet of these gateways. They should work on other UniFi Cloud Gateway and UDM-Pro based devices, but have **not been verified** on those platforms.
+**All scripts were developed and tested on the UCG-Fiber, and the scripts that do not need an SSD also on the UXG-Fiber (except `30`, tested on the UCG-Fiber only).** Through Network Optimizer they run across a large fleet of these gateways. They should work on other UniFi Cloud Gateway and UDM-Pro based devices, but have **not been verified** on those platforms.
 
 ### Verified UniFi OS versions (UCG-Fiber / UXG-Fiber)
 
@@ -108,10 +108,14 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
 | [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
+| [`30-ipv6-prefix-deprecation.sh`](scripts/30-ipv6-prefix-deprecation.sh) | 30 | Deprecate the old IPv6 prefix on the LAN after the delegated prefix changes | UCG-Fiber | **Testing** |
 
 > **SGMII+ (`19` / `20`):** Promoted from Testing to Stable — the modules have been running continuously on production UCG-Fiber and UXG-Fiber gateways for a couple months, across every UniFi OS release each model received from 5.1.15 through 6.0.5, including the 6.0.x Debian 13 rebase (no rebuild needed). Deploy **one script at a time**: loading both modules simultaneously is not supported (see the [port bitmap caveat](docs/sfp-sgmiiplus.md#port-bitmap-exclusion)).
 
 > **PostgreSQL SSD offload and backup (`08` / `09`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. `08` moves the Network app's PostgreSQL cluster (`14/apps`) to the SSD. `09` backs it up daily to the SSD and weekly to the eMMC. Both are in testing: field-verified on UCG-Fiber gateways (first migration, reboot, and a UniFi OS 6.0.10 to 6.0.11 upgrade while offloaded), not yet released through Network Optimizer. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) and [docs/postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md).
+
+> **IPv6 prefix deprecation (`30`):** For ISPs that delegate a new IPv6 prefix on every session, typically PPPoE. In tests with Telekom PPPoE, UniFi OS did not tell LAN clients that the old prefix was gone, so they kept using it until its preferred lifetime ran out (30 minutes with Telekom) and IPv6 failed meanwhile. `30` runs a small daemon that advertises the old prefix as deprecated within seconds. In testing on one UCG-Fiber; see [docs/ipv6-prefix-deprecation.md](docs/ipv6-prefix-deprecation.md).
+
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
 
 ### Boot Order
@@ -123,7 +127,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 - **`06`/`07` or `08`/`09`, not both.** Choose by the Network app's database: MongoDB up to Network 10.x, PostgreSQL from Network 11.0.81. To switch, retire `06`/`07` as described in [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md#retiring-the-mongodb-hooks).
 - **`08` must be executable.** `udm-boot` sources a non-executable `.sh` file instead of running it, and `08` refuses to run sourced.
 - `05`-`09` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against an already-restarted environment.
-- `10`, `15`, `19`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
+- `10`, `15`, `19`, `20` and `30` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
 - **If you add your own boot scripts** that touch the database or unifi (mongodump, psql, API calls, etc.), number them >= `10` so they run after `06` or `08`. A failed or skipped offload leaves the database on the eMMC, so check the bind mount before you rely on it.
 ### Model Compatibility
 
@@ -228,6 +232,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - PostgreSQL SSD offload, installation, upgrade behavior and recovery
 - [postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md) - PostgreSQL backup schedule, globals coverage and off-device restore
 - [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
+- [ipv6-prefix-deprecation.md](docs/ipv6-prefix-deprecation.md) - stale IPv6 prefixes after a PD change, how the daemon deprecates them, test results
 
 ### Research
 
@@ -259,6 +264,7 @@ Every script is designed to be safely reversible:
 
 - **journald & JVM heap:** The config files (`/etc/systemd/journald.conf`, `/etc/default/unifi`) are on the overlay filesystem but are **preserved across reboots** - removing the boot script alone does not revert them. You must manually restore stock values (see each script's docs for the sed commands) or wait for a UniFi OS upgrade, which resets the overlay. Either way, remove the boot script first so it doesn't re-apply on the next boot.
 - **Fan tuning:** `systemctl restart uhwd` immediately resets `config.fan` to defaults (the fan config lives in SDB runtime state, not a file). Remove the boot script to make it permanent.
+- **IPv6 prefix deprecation:** Remove the boot script, then disable the service and delete `/data/ipv6-prefix-deprecation` (commands in [the docs](docs/ipv6-prefix-deprecation.md#reverting)). Nothing else on the gateway is changed.
 - **MongoDB SSD:** See [docs/recovery.md](docs/recovery.md) for the full rollback guide. It covers four scenarios, because the right path depends on *why* you're rolling back: **Path D** (first-run install rollback - use when you just deployed `06` and something went wrong, or you changed your mind within minutes), **Path A** (live-migrate back to eMMC with current data - use when the SSD is healthy and you want off the offload after running it for a while, ~95% of rollbacks), **Path B** (mongorestore from the latest `07-mongodb-ssd-backup.sh` dump - use when the SSD or its data is broken), or **Path C** (nuclear fallback on the pre-deploy eMMC snapshot - stale, only use if Paths A and B both fail). In every path, stop `unifi-mongodb.service` *before* `umount` - the unmount fails with EBUSY while mongod has files open on the bind mount, and a plain `systemctl stop unifi` does not stop mongod (it's owned by a separate unit).
 
 ## Contributing
