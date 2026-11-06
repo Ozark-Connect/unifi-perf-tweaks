@@ -2,7 +2,7 @@
 
 **Script:** [`scripts/25-pppoe-gro.sh`](../scripts/25-pppoe-gro.sh)
 **Module:** [`modules/pppoe-gro/`](../modules/pppoe-gro/) (GPL-2.0, see its `LICENSE`)
-**Compatibility:** UCG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574), UniFi OS 6.0.11 build only (see [After a firmware update](#after-a-firmware-update))
+**Compatibility:** UCG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574), UniFi OS 6.0.11, 6.0.12, 6.0.15, 6.0.16 and 6.0.17 builds (see [After a firmware update](#after-a-firmware-update))
 **Risk level:** Medium - kernel module bound to one kernel build, touches the receive path of every WAN packet
 **Status:** Testing
 
@@ -68,12 +68,14 @@ HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers
 
 - `/sys/sfe/fast_tc_filter` set to 1, IPS/Suricata
 - Bridged or relayed PPPoE (the GSO path), PPPoE without VLAN, RFC 4638 (MTU 1500), PPP compression/MPPE (the script refuses to load with those modules)
-- UXG-Fiber, UCG-Ultra and any firmware other than 6.0.11
-- Long-term operation (in progress)
+- UXG-Fiber (its 6.0.17 kernel has a different build stamp and is not in the list) and UCG-Ultra
+- 6.0.12 and 6.0.15 on a running gateway: both were only checked against the 6.0.11 kernel image (see [After a firmware update](#after-a-firmware-update))
 
 ### Tested so far
 
 All with v0.4 on 2026-10-24. Deployment and an orderly reboot on the test gateway: the boot script loaded the module about 5.5 minutes after boot, after waiting out a PPPoE reconnect caused by the SGMII+ script switching eth6 to 2.5G, and released the marker 10 minutes later. A reboot during the 10-minute hold cleared the marker as intended. A forced PPPoE reconnect (SIGHUP to pppd) under download load with the module loaded: new session after about 8 seconds, aggregation continued on the new session at full rate, no errors in the counters or kernel log. With Smart Queues off, ECM hands the flows to the PPE after their first packets, so the module only sees those (about 0.2 % of the traffic in the test) and gains nothing; IPv4 and IPv6 downloads with checksum verification showed no errors at the handover.
+
+Long-term: the module has been in use on the test gateway since 2026-10-24, first on 6.0.11, from 2026-10-31 on 6.0.16 and from 2026-11-03 on 6.0.17, loaded by the boot script after each firmware update and reboot. On 6.0.17, after 2.4 days of uptime: 247 million PPPoE frames seen, 33 million aggregates built from 123 million segments, `complete_err` and `complete_toolong` 0, no kernel warnings. A PPPoE reconnect on 2026-11-06 (SIGHUP to pppd) left the module loaded and working; the new session was up after about 6 seconds.
 
 ## Pre-check
 
@@ -139,6 +141,8 @@ ssh root@<gateway-ip> 'rm /data/pppoe-gro/loading.marker; /data/on_boot.d/25-ppp
 The firmware has no `CONFIG_MODVERSIONS`, so `vermagic` does not protect against a changed `struct sk_buff`. The module reads and writes `sk_buff` and `napi_gro_cb` fields directly; a layout change would corrupt memory. The script therefore refuses any build that is not listed in `VERIFIED_BUILDS` and logs the values it found.
 
 To add a build: confirm that the functions touching these structs are unchanged, for example by comparing `skb_gro_receive`, `dev_gro_receive`, `napi_gro_complete` and `__skb_checksum_complete` between the old and new kernel image with PC-relative immediates masked, and that `pppoe.ko` and `qca-nss-dp.ko` are `.text`-identical. Then add a line with the new `uname -v` and the three sha256 values. A rebuild without code changes keeps the layout; a changed function in the skb code needs a closer look.
+
+The listed builds after 6.0.11 were checked this way, with every changed branch and address target matched against the symbol table: 6.0.12 kernel text is byte-identical; 6.0.15 changes only `skb_recycler_alloc`, which now sets `truesize` using the same offsets as the module; 6.0.16 is byte-identical to 6.0.15; 6.0.17 changes only `tcp_v4_reqsk_destructor` and `inet_sock_destruct` (RCU-deferred freeing of IP options). `pppoe.ko` is unchanged throughout. `qca-nss-dp.ko` changed in 6.0.12 only in its loopback ring setup, not in the WAN receive path.
 
 ## Building
 
