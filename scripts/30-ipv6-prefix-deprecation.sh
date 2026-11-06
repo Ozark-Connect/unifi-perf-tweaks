@@ -15,7 +15,7 @@
 # It never changes addresses, routes, or the UniFi dnsmasq configuration.
 #
 # Files: /data/ipv6-prefix-deprecation/ (daemon, prefix history),
-#        /etc/systemd/system/ipv6-prefix-deprecation.service (recreated at boot),
+#        /etc/systemd/system/ipv6-prefix-deprecation.service (rewritten when missing or changed),
 #        /run/ipv6-prefix-deprecation/status.json (status, RAM only).
 #
 # Temporary workaround until UniFi OS deprecates old prefixes itself.
@@ -333,7 +333,9 @@ class Tracker:
                 self._event(f"{br}: {p} is back, no longer deprecated")
             confirmed = []
             for p in list(st["current"]):
-                if p in cur:
+                if p in cur or p in present:
+                    # Still configured somewhere, e.g. deprecated next to its successor: keep it
+                    # tracked so it is deprecated once it is really gone.
                     self.missing.pop((br, p), None)
                     continue
                 n = self.missing.get((br, p), 0) + 1
@@ -525,7 +527,7 @@ def main():
             if error:
                 log(error)
             last_error = error
-        # A single failed poll is not worth an error on the status card.
+        # A single failed poll is not worth an error in the status file.
         error_polls = error_polls + 1 if error else 0
         reported_error = error if error_polls >= ERROR_REPORT_POLLS else None
         if tracker.dirty and not dry_run:
