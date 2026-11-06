@@ -31,7 +31,7 @@ It never changes addresses, routes or the UniFi configuration. It only sends whi
 | `/etc/systemd/system/ipv6-prefix-deprecation.service` | unit, checked on every boot and rewritten when missing or changed |
 | `/run/ipv6-prefix-deprecation/status.json` | current state, RAM only |
 
-While nothing changes, the daemon runs one `ip -j -6 addr show` every 3 seconds and writes `state.json` about once an hour, when renewed lifetimes have moved on by more than an hour.
+While nothing changes, the daemon runs one `ip -j -6 addr show` every 3 seconds and writes `state.json` only once the renewed lifetime has moved on by more than an hour since the last write (every 75 to 90 minutes with renewals every 15 to 30 minutes).
 
 ## Install
 
