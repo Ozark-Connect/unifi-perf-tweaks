@@ -1,0 +1,20 @@
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index db229d08f..8700bd6f0 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -739,6 +739,7 @@ struct sk_buff {
+ #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
+ 	unsigned long		 _nfct;
+ #endif
++	unsigned long		 _ubnt_layout_pad; /* UBNT_LAYOUT_PAD: vendor-only field, matches 5.4.213-ui-ipq9574 */
+ 	unsigned int		len,
+ 				data_len;
+ 	__u16			mac_len,
+@@ -891,6 +892,7 @@ struct sk_buff {
+ 	__u16			inner_network_header;
+ 	__u16			inner_mac_header;
+ 
++	__u32			_ubnt_layout_pad2; /* UBNT_LAYOUT_PAD2: vendor-only 4-byte field */
+ 	__be16			protocol;
+ 	__u16			transport_header;
+ 	__u16			network_header;
