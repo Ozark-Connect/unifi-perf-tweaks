@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "modules/force-uniphy1-sgmiiplus/force_uniphy1_sgmiiplus.c"
+SOURCE = ROOT / "modules/sfp-sgmiiplus/sfp_sgmiiplus.h"
 
 PRELUDE = r'''
 #include <assert.h>
@@ -48,10 +48,13 @@ static void atomic_dec(atomic_t *v) { v->value--; }
 static int atomic_read(const atomic_t *v) { return v->value; }
 static void observe_read(const char *);
 static void observe_write(const char *);
-static int writer_barriers, reader_barriers, callback_probe, publish_probe, abort_warnings;
+static int writer_barriers, reader_barriers, callback_probe, publish_probe, abort_warnings, rtnl_held;
+static void prepare_cmpxchg(void *);
+static void observe_lock(struct mutex *);
 static void test_warn(const char *format, ...);
 #define READ_ONCE(x) ({ observe_read(#x); (x); })
 #define WRITE_ONCE(x,v) ({ (x) = (v); observe_write(#x); })
+#define cmpxchg(p,o,n) ({ prepare_cmpxchg((void *)(p)); __typeof__(*(p)) seen = *(p); if (seen == (o)) { *(p) = (n); observe_write("drv->config_aneg"); } seen; })
 #define smp_load_acquire(p) (*(p))
 #define smp_store_release(p,v) (*(p) = (v))
 #define smp_wmb() (++writer_barriers)
@@ -65,6 +68,7 @@ static void test_warn(const char *format, ...);
 #define MODULE_DESCRIPTION(...)
 #define MODULE_VERSION(...)
 #define MODULE_PARM_DESC(...)
+#define module_param(...)
 #define module_param_cb(...)
 #define module_init(...)
 #define module_exit(...)
@@ -75,11 +79,11 @@ static void test_warn(const char *format, ...);
 #define UMH_NO_WAIT 0
 static void msleep(unsigned int ms) { (void)ms; }
 static void usleep_range(unsigned int a, unsigned int b) { (void)a; (void)b; }
-static void mutex_lock(struct mutex *m) { assert(!m->held); m->held = 1; }
+static void mutex_lock(struct mutex *m) { observe_lock(m); assert(!m->held); m->held = 1; }
 static int mutex_lock_killable(struct mutex *m) { mutex_lock(m); return 0; }
 static void mutex_unlock(struct mutex *m) { assert(m->held); m->held = 0; }
 static void rtnl_lock(void);
-static void rtnl_unlock(void) {}
+static void rtnl_unlock(void);
 static unsigned long kallsyms_lookup_name(const char *name);
 static int call_usermodehelper(char *path, char **argv, char **envp, int wait)
 { (void)path; (void)argv; (void)envp; (void)wait; return 0; }
@@ -91,7 +95,8 @@ static struct phy_driver driver;
 static struct phy_device phys[7];
 static struct {
     int mode, mac, force, bitmap, stopped, paused;
-    int get_error, set_error, set_calls, touched, pending, snapshots, calls, suppress_pending;
+    int get_error, set_error, set_fail_at, set_calls, touched, pending, snapshots, calls, suppress_pending;
+    int cas_race, no_phy, reading_pcs, peer_bit_change, exit_stock_request;
 } sim;
 
 static void observe_read(const char *s)
@@ -107,7 +112,7 @@ static void observe_write(const char *s)
         assert(writer_barriers > 0);
         reader_barriers = 0;
         callback_probe = 1;
-        assert(driver.config_aneg(&phys[6]) == 37);
+        assert(driver.config_aneg(&phys[SSDK_PORT_ID == 5 ? 6 : 5]) == 37);
         callback_probe = 0;
         publish_probe = 0;
     }
@@ -116,28 +121,52 @@ static void test_warn(const char *format, ...)
 {
     if (strstr(format, "takeover aborted after ignoring")) abort_warnings++;
 }
+static void observe_lock(struct mutex *m)
+{
+    if (m == cfg_mutex && !sim.reading_pcs)
+        assert(rtnl_held && phys[SSDK_PORT_ID].lock.held && sim.stopped && sim.paused);
+    if (m == &phys[SSDK_PORT_ID].lock && rtnl_held)
+        assert(sim.stopped && sim.paused && !cfg_mutex->held);
+}
+static int peer_aneg(struct phy_device *pd) { return 51; }
+static void prepare_cmpxchg(void *p)
+{
+    if (sim.cas_race) { driver.config_aneg = peer_aneg; sim.cas_race = 0; }
+}
 static void rtnl_lock(void)
 {
-    assert(!cfg_mutex || !cfg_mutex->held);
-    if (sim.suppress_pending) {
-        assert(driver.config_aneg(&phys[5]) == 0);
-        sim.suppress_pending = 0;
-    }
-    /* A stock callback which was already running completes while the guard
-     * drains old callers. The snapshot must see this complete new state. */
+    assert(!rtnl_held && (!cfg_mutex || !cfg_mutex->held));
+    rtnl_held = 1;
     if (sim.pending) { sim.mode = 4; sim.mac = 0xf; sim.force = 1; sim.pending = 0; }
 }
-int ssdk_mac_sw_sync_work_stop(unsigned int dev) { sim.stopped = 1; return 0; }
-int ssdk_mac_sw_sync_work_start(unsigned int dev) { assert(!cfg_mutex->held); sim.stopped = 0; return 0; }
+static void rtnl_unlock(void)
+{
+    assert(rtnl_held && !cfg_mutex->held);
+    if (sim.suppress_pending && driver.config_aneg == guarded_config_aneg) {
+        assert(driver.config_aneg(&phys[SSDK_PORT_ID]) == 37);
+        sim.suppress_pending = 0;
+    }
+    if (sim.exit_stock_request) {
+        assert(!guard_active);
+        assert(driver.config_aneg(&phys[SSDK_PORT_ID]) == 37);
+        sim.exit_stock_request = 0;
+    }
+    rtnl_held = 0;
+}
+int ssdk_mac_sw_sync_work_stop(unsigned int dev)
+{ assert(rtnl_held && !cfg_mutex->held && !phys[SSDK_PORT_ID].lock.held); sim.stopped = 1; return 0; }
+int ssdk_mac_sw_sync_work_start(unsigned int dev)
+{ assert(rtnl_held && !cfg_mutex->held && !phys[SSDK_PORT_ID].lock.held); sim.stopped = 0; return 0; }
 static void sync_task(struct work_struct *w) {}
 static void mib_task(struct work_struct *w) {}
-static void pause_mib(unsigned long p) { assert(sim.stopped); sim.paused = 1; }
-static int resume_mib(unsigned long p) { assert(!cfg_mutex->held); sim.paused = 0; return 0; }
+static void pause_mib(unsigned long p) { assert(rtnl_held && sim.stopped && !phys[SSDK_PORT_ID].lock.held); sim.paused = 1; }
+static int resume_mib(unsigned long p) { assert(rtnl_held && !cfg_mutex->held && !phys[SSDK_PORT_ID].lock.held); sim.paused = 0; return 0; }
 static unsigned long get_priv(unsigned int dev) { return (unsigned long)private_data; }
 static int get_mode(unsigned int dev, unsigned int port, int *out)
 {
     assert(cfg_mutex->held && sim.stopped && sim.paused);
-    assert(guard_active && driver.config_aneg == guarded_config_aneg);
+    assert(rtnl_held && phys[SSDK_PORT_ID].lock.held);
+    if (!sim.snapshots) assert(!guard_active);
     sim.snapshots++;
     *out = sim.mode;
     return sim.get_error;
@@ -147,7 +176,7 @@ static unsigned int get_mac(unsigned int dev, unsigned int idx)
 static int get_force(unsigned int dev, unsigned int port, unsigned int f)
 { assert(cfg_mutex->held); return sim.force; }
 static int phy_get(unsigned int dev, unsigned int port, struct phy_device **pd)
-{ *pd = &phys[port]; return 0; }
+{ *pd = sim.no_phy ? NULL : &phys[port]; return 0; }
 static unsigned int phy_port(unsigned int dev, struct phy_device *pd)
 { return (unsigned int)(pd - phys); }
 static int stock_aneg(struct phy_device *pd) { sim.calls++; return 37; }
@@ -156,9 +185,12 @@ static void bitmap_set(unsigned int dev, unsigned int bmp)
 { assert(cfg_mutex->held); sim.bitmap = bmp; }
 static int mode_set(unsigned int dev, unsigned int idx, int mode)
 {
-    assert(cfg_mutex->held && sim.stopped && sim.paused);
+    assert(cfg_mutex->held && sim.stopped && sim.paused && idx == UNIPHY_INDEX);
     sim.set_calls++; sim.touched++;
-    if (sim.set_error && sim.set_calls == 1) return sim.set_error;
+    if (sim.set_error && sim.set_calls == (sim.set_fail_at ? sim.set_fail_at : 1)) {
+        if (sim.peer_bit_change) sim.bitmap &= ~(1u << (SSDK_PORT_ID == 5 ? 6 : 5));
+        return sim.set_error;
+    }
     sim.mac = mode;
     return 0;
 }
@@ -170,12 +202,14 @@ static int feature_set(unsigned int dev, unsigned int port, unsigned int f)
 { assert(cfg_mutex->held); sim.force = 1; return 0; }
 static int feature_clear(unsigned int dev, unsigned int port, unsigned int f)
 { assert(cfg_mutex->held); sim.force = 0; return 0; }
+static int force_speed(unsigned int a, unsigned int b, unsigned int c)
+{ assert(cfg_mutex->held && b == UNIPHY_INDEX); sim.touched++; return 0; }
 static int hw3(unsigned int a, unsigned int b, unsigned int c)
-{ assert(cfg_mutex->held); sim.touched++; return 0; }
+{ assert(cfg_mutex->held && b == SSDK_PORT_ID); sim.touched++; return 0; }
 static int mac_enable(unsigned int a, unsigned int b, int c)
-{ assert(cfg_mutex->held); sim.touched++; return 0; }
+{ assert(cfg_mutex->held && b == SSDK_PORT_ID); sim.touched++; return 0; }
 static int hw2(unsigned int a, unsigned int b)
-{ assert(cfg_mutex->held); sim.touched++; return 0; }
+{ assert(cfg_mutex->held && b == SSDK_PORT_ID); sim.touched++; return 0; }
 static void status_init(unsigned int a, unsigned int b)
 { assert(cfg_mutex->held); }
 static int io6(unsigned int a, unsigned int b, u32 *v)
@@ -198,7 +232,7 @@ static unsigned long kallsyms_lookup_name(const char *s)
     MAP("hsl_port_feature_get", get_force);
     MAP("hsl_port_feature_set", feature_set);
     MAP("hsl_port_feature_clear", feature_clear);
-    MAP("hppe_uniphy_channel0_force_speed_mode_set", hw3);
+    MAP("hppe_uniphy_channel0_force_speed_mode_set", force_speed);
     MAP("adpt_hppe_port_txmac_status_set", mac_enable);
     MAP("adpt_hppe_port_rxmac_status_set", mac_enable);
     MAP("adpt_hppe_port_bridge_txmac_set", mac_enable);
@@ -224,90 +258,161 @@ static void setup(void)
     ((struct delayed_work *)(private_data + PRIV_SYNC_WORK))->work.func = sync_task;
     ((struct delayed_work *)(private_data + PRIV_MIB_WORK))->work.func = mib_task;
     sim.mode = 0xe; sim.mac = 0x14; sim.bitmap = 0x7f;
-    *(unsigned int *)(private_data + SPEED_CACHE_BASE + 4 * PORT_STRIDE) = 1000;
-    *(unsigned int *)(private_data + DUPLEX_CACHE_BASE + 4 * PORT_STRIDE) = 1;
+    *(unsigned int *)(private_data + SPEED_CACHE_BASE + (SSDK_PORT_ID - 1) * PORT_STRIDE) = 1000;
+    *(unsigned int *)(private_data + DUPLEX_CACHE_BASE + (SSDK_PORT_ID - 1) * PORT_STRIDE) = 1;
 }
-static void cleaned_up(void)
+static void cleaned_up(unsigned int expected, bool foreign)
 {
-    assert(!cfg_mutex->held && !sim.stopped && !sim.paused);
-    assert(driver.config_aneg == stock_aneg && !guard_active && !guard_drv);
-    assert(sim.bitmap == 0x7f);
+    assert(!cfg_mutex->held && !sim.stopped && !sim.paused && !rtnl_held);
+    assert(!phys[SSDK_PORT_ID].lock.held);
+    assert(driver.config_aneg == (foreign ? peer_aneg : stock_aneg));
+    assert(!guard_active && !guard_drv);
+    assert(sim.bitmap == (int)expected);
 }
 int main(int argc, char **argv)
 {
-    assert(argc == 2); setup();
+    assert(argc == 3); setup();
+    assert(SSDK_PORT_ID == EXPECTED_PORT && UNIPHY_INDEX == EXPECTED_UNIPHY);
+    assert(!hold); hold = atoi(argv[2]);
     const char *name = argv[1];
+    unsigned int expected = 0x7f, peer_bit = 1u << (SSDK_PORT_ID == 5 ? 6 : 5);
+    bool foreign = false;
     if (!strcmp(name, "snapshot_after_drain")) sim.pending = 1;
+    if (!strcmp(name, "exit_stock_fiber")) { sim.mode = 4; sim.mac = 0xf; sim.force = 1; }
     if (!strcmp(name, "get_failure")) sim.get_error = -5;
     if (!strcmp(name, "bad_pair")) sim.mac = 0x77;
-    if (!strcmp(name, "abort_suppressed")) { sim.mac = 0x77; sim.suppress_pending = 1; }
-    if (!strcmp(name, "mode_failure")) { sim.mode = 4; sim.mac = 0xf; sim.force = 1; sim.set_error = -7; }
+    if (!strcmp(name, "no_phy")) sim.no_phy = 1;
+    if (!strcmp(name, "bad_driver")) driver.name = "not QCA SFP";
+    if (!strcmp(name, "foreign_guard")) { driver.config_aneg = peer_aneg; foreign = true; }
+    if (!strcmp(name, "cas_race")) { sim.cas_race = 1; foreign = true; }
+    if (!strcmp(name, "own_bit_disabled")) { sim.bitmap &= ~(1u << SSDK_PORT_ID); expected = sim.bitmap; }
+    if (!strcmp(name, "mode_failure") || !strcmp(name, "abort_suppressed") || !strcmp(name, "failure_peer_bit")) {
+        sim.mode = 4; sim.mac = 0xf; sim.force = 1; sim.set_error = -7;
+        if (!strcmp(name, "abort_suppressed")) sim.suppress_pending = 1;
+        if (!strcmp(name, "failure_peer_bit")) { sim.peer_bit_change = 1; expected &= ~peer_bit; }
+    }
     if (!strcmp(name, "publication")) publish_probe = 1;
     int ret = force_sgmiiplus_init();
-    if (!strcmp(name, "get_failure") || !strcmp(name, "bad_pair") || !strcmp(name, "abort_suppressed")) {
-        assert(ret == (!strcmp(name, "get_failure") ? -EIO : -EBUSY));
-        assert(!sim.touched && !sim.set_calls); cleaned_up();
-        if (!strcmp(name, "abort_suppressed")) assert(abort_warnings == 1);
-    } else if (!strcmp(name, "mode_failure")) {
-        assert(ret == -7 && sim.mac == 0xf && sim.force == 1);
-        assert(sim.set_calls == 2); cleaned_up();
+    if (!strcmp(name, "no_phy") || !strcmp(name, "bad_driver")) {
+        assert(ret == -ENODEV && !sim.touched && !sim.snapshots); cleaned_up(expected, false);
+    } else if (!strcmp(name, "get_failure") || !strcmp(name, "bad_pair") || foreign) {
+        int want = !strcmp(name, "get_failure") ? -EIO : -EBUSY;
+        assert(ret == want && !sim.touched && !sim.set_calls); cleaned_up(expected, foreign);
+    } else if (sim.set_error) {
+        assert(ret == -7 && sim.mac == 0xf && sim.force == 1 && sim.set_calls == 2);
+        cleaned_up(expected, false);
+        if (!strcmp(name, "abort_suppressed")) assert(abort_warnings == 0 && sim.calls == 1);
     } else {
         assert(ret == 0 && sim.snapshots == 1);
         if (!strcmp(name, "snapshot_after_drain"))
             assert(orig_port_mode == 4 && orig_mac_mode == 0xf && orig_force == 1);
-        assert(driver.config_aneg(&phys[5]) == 0);
-        assert(driver.config_aneg(&phys[6]) == 37);
-        assert(sim.bitmap == (0x7f & ~(1 << 5)));
-        force_sgmiiplus_exit(); cleaned_up();
-        assert(sim.mode == orig_port_mode && sim.mac == (int)orig_mac_mode && sim.force == orig_force);
+        if (hold) {
+            assert(driver.config_aneg == guarded_config_aneg);
+            assert(driver.config_aneg(&phys[SSDK_PORT_ID]) == 0);
+        } else {
+            assert(driver.config_aneg == stock_aneg && !guard_active && !guard_drv);
+            assert(driver.config_aneg(&phys[SSDK_PORT_ID]) == 37);
+        }
+        assert(driver.config_aneg(&phys[SSDK_PORT_ID == 5 ? 6 : 5]) == 37);
+        assert(sim.bitmap == (int)(expected & ~(1u << SSDK_PORT_ID)));
+        if (!strcmp(name, "bitmap_peer_change")) { sim.bitmap &= ~peer_bit; expected &= ~peer_bit; }
+        char buf[32]; sim.reading_pcs = 1;
+        assert(param_get_pcs_link(buf, NULL) > 0 && !strcmp(buf, "1\n"));
+        sim.reading_pcs = 0;
+        int before_touched = sim.touched, before_set_calls = sim.set_calls;
+        int before_calls = sim.calls;
+        bool changed = !strcmp(name, "exit_stock_baset") || !strcmp(name, "exit_stock_fiber");
+        if (changed) {
+            /* A later stock decision must survive the default loader's rmmod. */
+            sim.mode = !strcmp(name, "exit_stock_baset") ? 4 : 0xe;
+            sim.mac = !strcmp(name, "exit_stock_baset") ? 0xf : 0x14;
+            sim.force = !strcmp(name, "exit_stock_baset") ? 1 : 0;
+        }
+        int expected_mode = changed ? sim.mode : orig_port_mode;
+        int expected_mac = changed ? sim.mac : orig_mac_mode;
+        int expected_force = changed ? sim.force : orig_force;
+        if (!strcmp(name, "exit_force_clear")) sim.force = 1;
+        if (!strcmp(name, "exit_mode_failure")) { sim.set_error = -7; sim.set_fail_at = sim.set_calls + 1; }
+        if (!strcmp(name, "exit_read_failure")) sim.get_error = -5;
+        if (!strcmp(name, "exit_missing_phy")) sim.no_phy = 1;
+        if (!strcmp(name, "exit_foreign_guard")) driver.config_aneg = peer_aneg;
+        if (!strcmp(name, "exit_stock_request")) sim.exit_stock_request = 1;
+        force_sgmiiplus_exit();
+        bool missing = !strcmp(name, "exit_missing_phy");
+        bool unreadable = !strcmp(name, "exit_read_failure");
+        if (missing) expected &= ~(1u << SSDK_PORT_ID);
+        cleaned_up(expected, !strcmp(name, "exit_foreign_guard"));
+        if (changed || missing || unreadable) assert(sim.touched == before_touched && sim.set_calls == before_set_calls);
+        if (missing || unreadable) assert(sim.mode == 6 && sim.mac == 0xc);
+        else assert(sim.mode == expected_mode && sim.mac == expected_mac && sim.force == expected_force);
+        if (!strcmp(name, "exit_stock_request")) assert(sim.calls == before_calls + 1 && !sim.exit_stock_request);
+        if (!strcmp(name, "exit_mode_failure")) assert(sim.set_calls == before_set_calls + 1);
     }
     puts(name); return 0;
 }
+
 '''
 
 
-class ModuleTests(unittest.TestCase):
+class ModuleTestCases:
     @classmethod
     def setUpClass(cls):
         source = Path(os.environ.get("MODULE_SOURCE", SOURCE)).read_text()
-        source = re.sub(r"^#include[^\n]*", "", source, flags=re.M)
-        cls.temp = tempfile.TemporaryDirectory(prefix="pr14-module-", dir="/private/tmp")
+        wrapper = (ROOT / f"modules/force-uniphy{cls.index}-sgmiiplus/force_uniphy{cls.index}_sgmiiplus.c").read_text()
+        source = re.sub(r"^#include[^\n]*", "", wrapper + source, flags=re.M)
+        cls.temp = tempfile.TemporaryDirectory(prefix="pr14-module-")
         cls.addClassCleanup(cls.temp.cleanup)
         cfile = Path(cls.temp.name) / "module-test.c"
         cls.binary = Path(cls.temp.name) / "module-test"
         cfile.write_text(PRELUDE + source + SUFFIX)
         flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"] if os.environ.get("MODULE_TEST_SANITIZERS") == "1" else []
-        result = subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", *flags, "-Wall", "-Wextra", "-Werror",
+        result = subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", f"-DEXPECTED_PORT={cls.port}", f"-DEXPECTED_UNIPHY={cls.index}", *flags, "-Wall", "-Wextra", "-Werror",
                                  "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-parameter",
                                  "-Wno-deprecated-declarations",  # host libc marks kernel sprintf deprecated
                                  str(cfile), "-o", str(cls.binary)], capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(result.stderr)
 
-    def scenario(self, name):
-        result = subprocess.run([str(self.binary), name], text=True, capture_output=True, timeout=5)
+    def scenario(self, name, mode=1):
+        result = subprocess.run([str(self.binary), name, str(mode)], text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_snapshot_waits_for_old_callback_and_config_mutex(self):
-        self.scenario("snapshot_after_drain")
+    def test_default_keeps_stock_callback_and_reports_pcs(self): self.scenario("normal", 0)
+    def test_hold_keeps_target_and_delegates_other_port(self): self.scenario("normal", 1)
+    def test_snapshot_waits_for_callbacks_default(self): self.scenario("snapshot_after_drain", 0)
+    def test_snapshot_waits_for_callbacks_hold(self): self.scenario("snapshot_after_drain", 1)
+    def test_snapshot_read_failure_default(self): self.scenario("get_failure", 0)
+    def test_snapshot_read_failure_hold(self): self.scenario("get_failure", 1)
+    def test_refuses_unsupported_pair_default(self): self.scenario("bad_pair", 0)
+    def test_refuses_unsupported_pair_hold(self): self.scenario("bad_pair", 1)
+    def test_mode_failure_restores_state_default(self): self.scenario("mode_failure", 0)
+    def test_mode_failure_restores_state_hold(self): self.scenario("mode_failure", 1)
+    def test_failure_preserves_peer_bitmap(self): self.scenario("failure_peer_bit", 0)
+    def test_exit_preserves_peer_bitmap(self): self.scenario("bitmap_peer_change", 0)
+    def test_initially_excluded_own_bit_remains_excluded(self): self.scenario("own_bit_disabled", 0)
+    def test_other_hold_owner_is_preserved(self): self.scenario("foreign_guard", 1)
+    def test_atomic_hold_owner_race_is_rejected(self): self.scenario("cas_race", 1)
+    def test_aborted_takeover_delegates_waiting_stock_request(self): self.scenario("abort_suppressed", 1)
+    def test_callback_publication_orders_other_port(self): self.scenario("publication", 1)
+    def test_missing_phy_changes_nothing(self): self.scenario("no_phy", 0)
+    def test_unexpected_phy_driver_changes_nothing(self): self.scenario("bad_driver", 0)
+    def test_exit_preserves_new_stock_baset(self): self.scenario("exit_stock_baset", 0)
+    def test_exit_preserves_new_stock_fiber(self): self.scenario("exit_stock_fiber", 0)
+    def test_exit_clears_force_when_restoring_unforced_snapshot(self): self.scenario("exit_force_clear", 0)
+    def test_exit_read_failure_leaves_hardware_untouched(self): self.scenario("exit_read_failure", 0)
+    def test_default_exit_without_phy_leaves_hardware_untouched(self): self.scenario("exit_missing_phy", 0)
+    def test_hold_exit_without_phy_removes_guard_safely(self): self.scenario("exit_missing_phy", 1)
+    def test_exit_preserves_replacement_callback(self): self.scenario("exit_foreign_guard", 1)
+    def test_hold_exit_delegates_after_revert(self): self.scenario("exit_stock_request", 1)
+    def test_exit_mode_failure_releases_locks_and_restores_bitmap(self): self.scenario("exit_mode_failure", 1)
 
-    def test_snapshot_read_failure_releases_guard_and_workers(self):
-        self.scenario("get_failure")
 
-    def test_unsupported_pair_does_not_touch_hardware(self):
-        self.scenario("bad_pair")
+class Eth6ModuleTests(ModuleTestCases, unittest.TestCase):
+    index, port = 1, 5
 
-    def test_failed_mode_set_restores_original_force_and_mode(self):
-        self.scenario("mode_failure")
 
-    def test_aborted_takeover_reports_suppressed_requests(self):
-        self.scenario("abort_suppressed")
-
-    def test_callback_publication_orders_other_port_dependencies(self):
-        self.scenario("publication")
-
-    def test_takeover_and_unload_restore_original_state(self):
-        self.scenario("normal")
+class Eth5ModuleTests(ModuleTestCases, unittest.TestCase):
+    index, port = 2, 6
 
 
 if __name__ == "__main__":

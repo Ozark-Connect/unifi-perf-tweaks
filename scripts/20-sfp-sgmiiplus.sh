@@ -1,45 +1,15 @@
 #!/bin/sh
-# 20-sfp-sgmiiplus.sh: Force 2nd SFP+ port (eth6 / Port 7) to SGMII+ 2.5G
+# 20-sfp-sgmiiplus.sh: set eth6 / Port 7 to SGMII+ 2.5G.
 #
-# Waits for the SFP to establish a 1G link, then loads a kernel module that
-# switches uniphy1 from SGMII 1G to SGMII+ 2.5G. The wait avoids a boot-order
-# race with SFPs that need time to configure their SerDes (e.g., Zyxel PMG3000
-# takes ~15s after boot to fire its 2.5G override). If no 1G link appears
-# within the timeout, the module loads anyway — this handles SFPs that are
-# hard-locked at 2.5G and can't establish a 1G link without the host matching.
-#
-# The boot-time mode set does not always commit: uniphy1 can stay at 125 MHz
-# even though insmod succeeded, and early in boot a set that did commit can
-# still be reverted up to ~35s later. Which boots are affected is timing-
-# dependent, so a given firmware and SFP can boot cleanly and fail on the next
-# try. The script retries up to five times, restoring stock SGMII 1G between
-# attempts, and verifies that the 312.5 MHz clock holds for 45s before
-# declaring success.
-#
-# The module bypasses the SSDK's SFP EEPROM validation by calling the uniphy
-# mode set function directly. The SSDK's MAC sync polling loop re-reads the
-# SFP EEPROM every ~12s and would revert the 2.5G change. The module (v3+)
-# excludes eth6 from the polling loop's port bitmap and restarts it — the loop
-# continues to run for all other ports, so eth5 link recovery is unaffected.
-#
-# Module v5 ignores the SFP auto-detect's link setting requests for eth6, so
-# SGMII+ survives SFP re-plugs, SFP reboots and the fiber coming back. UniFi
-# therefore no longer drops a non-2.5G SFP back to 1G while the module is
-# loaded, so the script does it: success also needs the 2.5G SerDes link
-# (module parameter pcs_link) within LINK_TIMEOUT, otherwise the module is
-# removed and eth6 stays at stock SGMII 1G. After success the script keeps
-# watching eth6. A different SFP updates the watched identity without a live
-# reload while PCS is up. No 2.5G link for LINK_TIMEOUT (also with an empty
-# cage) removes the module and runs the load procedure again. All automatic
-# recovery entries share MAX_RERUNS runs per hour, each with MAX_ATTEMPTS
-# load attempts. Only one instance runs at a time. An SFP that only links at 1G is remembered
-# and left at 1G until it is replaced. An empty cage is never taken over.
-#
-# WARNING: This targets eth6 / Port 7 (the 2nd SFP+ port) ONLY.
-# For eth5 / Port 6, use 19-sfp-sgmiiplus-eth5.sh instead.
-#
-# Target: UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
-# Requires: qca-ssdk.ko loaded, module pre-deployed to /data/sfp-sgmiiplus/
+# Default: one-shot load with up to five clock retries and a 45s clock hold.
+# Stock SFP auto-detection and recovery remain active; older modules work.
+# Opt in to persistent hold with /data/sfp-sgmiiplus/hold (either port) or
+# /data/sfp-sgmiiplus/hold-eth6. Hold requires a module exposing active hold
+# and pcs_link parameters. It watches SFP identity and PCS, bounds recovery
+# to three runs/hour, and leaves a stock-1G-capable SFP at 1G after fallback.
+# Only one port may hold at a time. Flags are read at boot and the choice
+# survives automatic recovery; changing flags takes effect on the next boot.
+# Target: UCG-Fiber / UXG-Fiber, kernel 5.4.213-ui-ipq9574.
 
 SCRIPT_NAME="sfp-sgmiiplus"
 LOG_FILE="/var/log/${SCRIPT_NAME}.log"
@@ -57,6 +27,13 @@ HOLD_SECS=45
 LINK_TIMEOUT=180
 WATCH_INTERVAL=5
 MAX_RERUNS=3
+HOLD_MODE=0
+if [ "$1" = "--rerun" ] && [ "$3" = "1" ]; then
+    # Internal recovery retains the boot-time choice even if a flag is removed.
+    HOLD_MODE=1
+elif [ -e "${MODULE_DIR}/hold" ] || [ -e "${MODULE_DIR}/hold-${IFACE}" ]; then
+    HOLD_MODE=1
+fi
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
@@ -86,7 +63,7 @@ sfp_name() {
 }
 
 # 1 = 2.5G SerDes link up, 0 = down or unreadable, empty = the module has no
-# such parameter (pre-v5 module)
+# such parameter
 pcs_link() {
     [ -e "${PARAM_DIR}/pcs_link" ] || { echo ""; return; }
     v=$(cat "${PARAM_DIR}/pcs_link" 2>/dev/null)
@@ -134,12 +111,12 @@ watch_for_new_sfp() {
         now_id=$(sfp_id)
         if [ -n "${now_id}" ] && [ "${now_id}" != "${last}" ]; then
             log "SFP changed to $(sfp_name); running the load procedure"
-            exec "$0" --rerun "${RERUN_TIMES}"
+            exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
         fi
         now=$(monotonic_seconds) || { log "ERROR: cannot read monotonic time"; exit 1; }
         if [ "${retry_secs}" -gt 0 ] && [ $((now - since)) -ge "${retry_secs}" ]; then
             log "Retrying 2.5G after ${retry_secs}s"
-            exec "$0" --rerun "${RERUN_TIMES}"
+            exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
         fi
         [ -n "${now_id}" ] && last="${now_id}"
     done
@@ -158,19 +135,21 @@ RUN_MODE="$1"
 
 # One instance at a time, also across the re-exec of the watcher: fd 8 stays
 # open through exec, so a rerun keeps the lock it already holds.
-if ! command -v flock >/dev/null 2>&1; then
-    log "ERROR: flock is required; no module action taken"
-    exit 1
-fi
-if [ "$1" != "--rerun" ] || ! { : >&8; } 2>/dev/null; then
-    if ! { command exec 8>>"${LOCK_FILE}"; } 2>/dev/null; then
-        log "ERROR: ${LOCK_FILE} not writable; no module action taken"
+if [ "${HOLD_MODE}" -eq 1 ]; then
+    if ! command -v flock >/dev/null 2>&1; then
+        log "ERROR: flock is required; no module action taken"
         exit 1
     fi
-fi
-if ! flock -n 8; then
-    log "Another run is active (${LOCK_FILE} held). Nothing to do."
-    exit 0
+    if [ "$1" != "--rerun" ] || ! { : >&8; } 2>/dev/null; then
+        if ! { command exec 8>>"${LOCK_FILE}"; } 2>/dev/null; then
+            log "ERROR: ${LOCK_FILE} not writable; no module action taken"
+            exit 1
+        fi
+    fi
+    if ! flock -n 8; then
+        log "Another run is active (${LOCK_FILE} held). Nothing to do."
+        exit 0
+    fi
 fi
 
 # ─── Sanity checks ───
@@ -190,13 +169,8 @@ if ! lsmod | grep -q "qca_ssdk"; then
     exit 1
 fi
 
-# Require the ordered-publication implementation, not the older v5 binary.
-if ! grep -Fq "config_aneg guard installed (ordered publication)" "${MODULE_FILE}"; then
-    log "ERROR: ${MODULE_FILE} is not the ordered-publication v5.1 module; this script needs v5.1"
-    exit 1
-fi
-
-if [ ! -r "${CLOCK_PATH}" ]; then
+# Hold needs clock verification; the default keeps the legacy clock rules.
+if [ "${HOLD_MODE}" -eq 1 ] && [ ! -r "${CLOCK_PATH}" ]; then
     log "ERROR: ${CLOCK_PATH} not readable; cannot verify 2.5G, no module action taken"
     exit 1
 fi
@@ -229,7 +203,7 @@ admit_recovery() {
         remaining=$((3600 - now + oldest))
         log "Recovery budget (${MAX_RERUNS}/h) used up; leaving stock SGMII 1G for ${remaining}s"
         sleep "${remaining}"
-        exec "$0" --rerun "${recent}"
+        exec "$0" --rerun "${recent}" "${HOLD_MODE}"
         exit 1
     fi
     RERUN_TIMES="${recent} ${now}"
@@ -237,22 +211,25 @@ admit_recovery() {
 
 # ─── Never take over an empty cage ───
 
-elapsed=0
-SFP_ID=$(sfp_id)
-while [ -z "${SFP_ID}" ] && [ $elapsed -lt $CARRIER_TIMEOUT ]; do
-    sleep 2
-    elapsed=$((elapsed + 2))
+if [ "${HOLD_MODE}" -eq 1 ]; then
+    elapsed=0
     SFP_ID=$(sfp_id)
-done
-if [ -z "${SFP_ID}" ]; then
-    log "No SFP detected in ${IFACE} after ${CARRIER_TIMEOUT}s; leaving stock SGMII 1G"
-    watch_for_new_sfp "" 0
-fi
-log "SFP in ${IFACE}: $(sfp_name)"
+    while [ -z "${SFP_ID}" ] && [ $elapsed -lt $CARRIER_TIMEOUT ]; do
+        sleep 2
+        elapsed=$((elapsed + 2))
+        SFP_ID=$(sfp_id)
+    done
+    if [ -z "${SFP_ID}" ]; then
+        log "No SFP detected in ${IFACE} after ${CARRIER_TIMEOUT}s; leaving stock SGMII 1G"
+        watch_for_new_sfp "" 0
+    fi
+    log "SFP in ${IFACE}: $(sfp_name)"
 
-if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${SFP_ID}" ]; then
-    log "This SFP only linked at 1G since boot; leaving stock SGMII 1G (delete ${STATE_FILE} to try 2.5G again)"
-    watch_for_new_sfp "${SFP_ID}" 0
+    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${SFP_ID}" ]; then
+        log "This SFP only linked at 1G since boot; leaving stock SGMII 1G (delete ${STATE_FILE} to try 2.5G again)"
+        watch_for_new_sfp "${SFP_ID}" 0
+    fi
+
 fi
 
 # ─── Wait for 1G carrier or timeout ───
@@ -272,18 +249,18 @@ if [ "$carrier" != "1" ]; then
     log "${IFACE} no carrier after ${CARRIER_TIMEOUT}s — loading module anyway (SFP may be hard-locked at 2.5G)"
 fi
 
-if [ "$(sfp_id)" != "${SFP_ID}" ]; then
+if [ "${HOLD_MODE}" -eq 1 ] && [ "$(sfp_id)" != "${SFP_ID}" ]; then
     log "SFP in ${IFACE} was removed or replaced while waiting; starting over"
     sleep ${WATCH_INTERVAL}
-    exec "$0" --rerun "${RERUN_TIMES}"
+    exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
 fi
 
 # ─── Load and verify module ───
 
-admit_recovery
+[ "${HOLD_MODE}" -ne 1 ] || admit_recovery
 
 BEFORE_CLOCK=""
-if [ -r "${CLOCK_PATH}" ]; then
+if [ -f "${CLOCK_PATH}" ]; then
     BEFORE_CLOCK=$(cat "${CLOCK_PATH}")
     log "Clock rate before: ${BEFORE_CLOCK} Hz"
 fi
@@ -292,35 +269,57 @@ attempt=1
 verified=0
 
 while [ $attempt -le $MAX_ATTEMPTS ]; do
-    if [ "$(sfp_id)" != "${SFP_ID}" ]; then
+    if [ "${HOLD_MODE}" -eq 1 ] && [ "$(sfp_id)" != "${SFP_ID}" ]; then
         log "SFP in ${IFACE} was removed or replaced; starting over"
         sleep ${WATCH_INTERVAL}
-        exec "$0" --rerun "${RERUN_TIMES}"
+        exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
     fi
     log "Loading ${MODULE_NAME} (attempt ${attempt}/${MAX_ATTEMPTS})..."
 
-    insmod "${MODULE_FILE}" 2>> "${LOG_FILE}"
+    if [ "${HOLD_MODE}" -eq 1 ]; then
+        insmod "${MODULE_FILE}" hold=1 2>> "${LOG_FILE}"
+    else
+        insmod "${MODULE_FILE}" 2>> "${LOG_FILE}"
+    fi
     RET=$?
 
     if [ ${RET} -ne 0 ]; then
         log "ERROR: insmod failed with exit code ${RET}"
+        [ "${HOLD_MODE}" -ne 1 ] || log "ERROR: hold opt-in could not be loaded (unsupported parameter, busy hold owner, or module error); not retrying without hold"
         exit 1
+    fi
+
+    if [ "${HOLD_MODE}" -eq 1 ]; then
+        hold_value=$(cat "${PARAM_DIR}/hold" 2>/dev/null)
+        case "${hold_value}" in
+            Y|1) hold_active=1 ;;
+            *) hold_active=0 ;;
+        esac
+        if [ "${hold_active}" -ne 1 ] || [ ! -r "${PARAM_DIR}/pcs_link" ]; then
+            log "ERROR: loaded module does not support active hold with pcs_link; loaded legacy module remains loaded to avoid an unsafe live unload"
+            log "ERROR: replace the module with a matching hold-capable KO and perform a planned reboot; no watcher or retry started"
+            exit 1
+        fi
     fi
 
     # Give the mode set sequence time to complete (~300ms PLL relock + calibration)
     sleep 1
 
-    if [ ! -r "${CLOCK_PATH}" ]; then
-        log "ERROR: ${CLOCK_PATH} disappeared; cannot verify clock rate"
-        remove_module
-        exit 1
+    if [ "${HOLD_MODE}" -eq 1 ]; then
+        if [ ! -r "${CLOCK_PATH}" ] || ! AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null); then
+            log "ERROR: ${CLOCK_PATH} unreadable; cannot verify clock rate"
+            remove_module
+            exit 1
+        fi
+    else
+        if [ ! -f "${CLOCK_PATH}" ]; then
+            log "WARNING: ${CLOCK_PATH} not found, cannot verify clock rate"
+            verified=1
+            break
+        fi
+        AFTER_CLOCK=$(cat "${CLOCK_PATH}")
     fi
 
-    if ! AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null); then
-        log "ERROR: ${CLOCK_PATH} unreadable; cannot verify clock rate"
-        remove_module
-        exit 1
-    fi
     log "Clock rate after attempt ${attempt}: ${AFTER_CLOCK} Hz"
 
     # Clock is the success criterion, not carrier, so no-link 2.5G SFPs work.
@@ -330,10 +329,14 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
         while [ $held -lt $HOLD_SECS ]; do
             sleep 5
             held=$((held + 5))
-            if [ ! -r "${CLOCK_PATH}" ] || ! AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null); then
-                log "ERROR: ${CLOCK_PATH} unreadable during hold; cannot verify clock rate"
-                remove_module
-                exit 1
+            if [ "${HOLD_MODE}" -eq 1 ]; then
+                if [ ! -r "${CLOCK_PATH}" ] || ! AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null); then
+                    log "ERROR: ${CLOCK_PATH} unreadable during hold; cannot verify clock rate"
+                    remove_module
+                    exit 1
+                fi
+            else
+                AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null)
             fi
             if [ "${AFTER_CLOCK}" != "312500000" ]; then
                 break
@@ -399,7 +402,12 @@ else
     exit 1
 fi
 
-# ─── v5: the SFP must actually link at 2.5G ───
+if [ "${HOLD_MODE}" -ne 1 ]; then
+    log "Done"
+    exit 0
+fi
+
+# ─── Hold: the SFP must actually link at 2.5G ───
 
 wait_pcs_link
 case $? in
@@ -418,7 +426,7 @@ case $? in
         fi
         ;;
     2)
-        log "ERROR: module reports no pcs_link (pre-v5 module?); removing it, ${IFACE} stays at stock SGMII 1G"
+        log "ERROR: module reports no pcs_link; removing it, ${IFACE} stays at stock SGMII 1G"
         remove_module
         exit 1
         ;;
@@ -445,7 +453,7 @@ esac
 
 log "Done; watching ${IFACE}"
 
-# ─── v5: watch for SFP changes and lost 2.5G link ───
+# ─── Hold: watch for SFP changes and lost 2.5G link ───
 
 nolink=0
 while :; do
@@ -477,5 +485,5 @@ while :; do
 
     log "${reason}; removing ${MODULE_NAME} and running the load procedure again"
     remove_module
-    exec "$0" --rerun "${RERUN_TIMES}"
+    exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
 done

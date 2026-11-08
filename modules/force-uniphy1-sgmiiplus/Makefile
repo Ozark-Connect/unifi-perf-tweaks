@@ -1,3 +1,4 @@
+ccflags-y += -I$(src)/../sfp-sgmiiplus
 obj-m += force_uniphy1_sgmiiplus.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build

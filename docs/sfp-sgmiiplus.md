@@ -4,14 +4,14 @@
 **Modules:** [`modules/force-uniphy1-sgmiiplus/`](../modules/force-uniphy1-sgmiiplus/) (eth6), [`modules/force-uniphy2-sgmiiplus/`](../modules/force-uniphy2-sgmiiplus/) (eth5)
 **Compatibility:** UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
 **Risk level:** Medium - kernel module, modifies SSDK internal state
-**Status:** Production (eth6 v5: Testing)
+**Status:** Stable (hold mode: Testing, both ports)
 **Also known as:** HSGMII (Intel/Lantiq/MaxLinear terminology for the same 2.5G SerDes mode)
 
 ## Problem
 
 To run optimally for OLT downstream bursts, GPON ONT SFP modules need to run at 2.5G SGMII+ (HSGMII) on the UCG-Fiber / UXG-Fiber's SFP+ ports, but the QCA-SSDK's SFP EEPROM validation blocks the speed change. The SSDK reads the SFP's EEPROM, checks its advertised capabilities, and refuses to set the port to a speed the EEPROM doesn't explicitly list - even when the SFP hardware supports 2.5G just fine.
 
-On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) that polls all switch ports every ~400ms. For any port it manages, the loop reads the link speed from a PPE hardware status register and reconfigures the MAC to match. Because SGMII+ has no 2.5G speed code in the SGMII in-band protocol, the PPE always reports 1000M for a 2.5G link. If the loop manages our port, it forces the MAC to 1G, breaking the 2.5G data path. The module excludes our port from the loop's port bitmap so the loop manages all other ports (LAN, eth5 SFP+ trunk) but never touches ours.
+On top of that, the SSDK runs a MAC sync polling loop (`qca_hppe_mac_sw_sync_task`) that polls all switch ports every ~400ms. For any port it manages, the loop reads the link speed from a PPE hardware status register and reconfigures the MAC to match. Because SGMII+ has no 2.5G speed code in the SGMII in-band protocol, the PPE always reports 1000M for a 2.5G link. If the loop manages our port, it forces the MAC to 1G, breaking the 2.5G data path. The module excludes our port from the loop's port bitmap so the loop continues managing the other ports while skipping the selected SGMII+ port.
 
 ### Why a kernel module
 
@@ -21,25 +21,62 @@ The SGMII+ mode set requires kernel-level operations that can't be done from use
 
 Both modules (uniphy1 for eth6, uniphy2 for eth5) follow the same sequence:
 
-1. Saves the current port bitmap via `qca_ssdk_port_bmp_get()`, then stops the MAC sync polling loop briefly to prevent races during the mode change
-2. Excludes the target port from the polling loop's port bitmap via `qca_ssdk_port_bmp_set()` - the loop will skip the port entirely, preventing it from forcing the MAC to 1G
-3. Sets the target uniphy to SGMII+ mode by calling `adpt_hppe_uniphy_mode_set(0, uniphy_index, 0x0c)`, which sets uniphy register 0x218 to 0x50 (SGMII+ SerDes mode, vs 0x30 for SGMII), performs the PLL reset/relock sequence (reg 0x780: 0x2bf to 0x2ff, ~200ms), updates mode control register 0x46c with SGMII+ flags, runs software reset and calibration, and sets the TX/RX clocks to 312.5 MHz
-4. Updates SSDK bookkeeping: sets the per-port interface mode via `_adpt_hppe_port_interface_mode_set()` and the per-uniphy global mac_mode via `ssdk_dt_global_set_mac_mode()`
-5. Waits 1 second for the link to stabilize after the mode change, then restarts the polling loop - the loop now manages all other ports but skips the target port
-6. Writes 2500 to the SSDK SFP PHY speed cache (`ssdk_phy_priv_data` at offset 0x690), fires `ssdk_port_link_notify` and `ubnt_send_phy_event`, then triggers an async `RTM_NEWLINK` (transient interface alias set/clear) so `ubios-udapi-server` re-reads ethtool. This makes ethtool, sysfs, UDAPI, and UniFi Network all report 2.5G
-7. On unload (`rmmod`), restores the speed cache to its original value and reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap), then restarts the polling loop with the full port set
+1. Takes RTNL, stops MAC sync and pauses initialized MIB work, then takes the target PHY lock and the SSDK config mutex. Only then snapshots the target port's interface mode, uniphy mac_mode and forced-speed state. RTNL and the PHY lock exclude both stock `config_aneg` call paths in default mode as well as hold mode.
+2. In hold mode, installs the target-port `config_aneg` guard after checking the snapshot. Saves the target port's current bitmap membership via `qca_ssdk_port_bmp_get()` and clears only its bit via `qca_ssdk_port_bmp_set()`, so the polling loop will skip that port.
+3. Takes the target MACs down and clears forced-speed state before calling `adpt_hppe_uniphy_mode_set(0, uniphy_index, 0x0c)`. This selects SGMII+ (uniphy register 0x218: 0x50 rather than SGMII 0x30), runs the PLL reset/calibration sequence and sets TX/RX clocks to 312.5 MHz.
+4. Updates per-port interface mode and per-uniphy mac_mode bookkeeping, then runs the vendor MAC link-up sequence for 2500 full duplex.
+5. Updates the target port's SFP speed, duplex and link caches to 2500/full/up under the config mutex. A peer-port stock path may requeue MAC sync; that worker serializes on the same mutex and skips the excluded target bit. Releases the config and PHY locks, resumes MIB work and MAC sync, then releases RTNL. There is no one-second stabilization sleep in the module; the loader's clock and link waits are separate.
+6. After workers resume, sends `ssdk_port_link_notify` and `ubnt_send_phy_event` when available, and schedules an asynchronous `RTM_NEWLINK` notification after two seconds so `ubios-udapi-server` re-reads ethtool.
+7. On unload, enters the same locked transition. It restores the saved hardware mode only if the current interface/mac_mode pair is still SGMII+ (`6` / `0x0c`); if stock has made a newer decision or the mode cannot be read, it preserves the current hardware settings. It restores the saved speed/duplex caches and only its own bitmap bit, resets the port polling status and resumes workers. Other ports' bitmap changes are preserved. If it cannot enter the transition, it logs that restoration was not performed and a planned reboot is required. Routine updates and rollback use a planned gateway reboot; see below.
 
 The mode set causes the target interface to flap briefly (~300ms) while the PLL relocks.
 
-### eth6 module v5
+### Module modes
 
-The eth6 module (`force_uniphy1_sgmiiplus`, v5) adds three things to the sequence above. The eth5 module is still v4.
+Both port-specific module names are retained and share one implementation to keep
+behavior consistent. Both sources declare `MODULE_VERSION("5")`; the vendor
+`CONFIG_MODULE_STRIPPED` setting can remove this metadata from the built module.
+The `hold` parameter is set at load time and is read-only afterward:
 
-- **Keeps SGMII+ across SFP events.** On SFP insert, SFP reboot and fiber return, `ubios-udapi-server`'s SFP auto-detect sets eth6 to 1000/autoneg-off and autoneg-on through ethtool. The "QCA SFP" fake PHY's `config_aneg` (`sfp_phy_config_aneg`) then re-applies the interface mode and switches uniphy1 back to SGMII 1G (with a 500 ms TX_DISABLE pulse). Port 5 is out of the polling loop, so nothing switches it back. v5 wraps the driver's `config_aneg` and ignores it for port 5 only while loaded (`suppressed` counts the ignored calls). The wrapper is installed only if the callback still points at `sfp_phy_config_aneg` and is removed on unload.
-- **Switches uniphy1 the way qca-ssdk does.** `adpt_hppe_uniphy_mode_set` resets uniphy1 for more than 100 ms and gates its port clocks. qca-ssdk only calls it under its config mutex (`adpt_hppe_port_interface_mode_apply`). v5 now loads and unloads the same way: MAC sync loop stopped, MIB counter work paused, config mutex held, port 5's MACs taken down first, then the vendor link-up sequence for 2500 full duplex (port speed clock, MAC speed and duplex, adapter reset, MACs on). Before this, one live `rmmod`/`insmod` under WAN traffic was followed by a SoC reset (`reset_reason: AHB Timeout`); the cause was not proven, and v4 and the eth5 module switch without the mutex too.
-- **Exposes the SerDes link.** `/sys/module/force_uniphy1_sgmiiplus/parameters/pcs_link` reads uniphy1's live link bit (1 up, 0 down, -1 unreadable), independent of the frozen link cache; the boot script uses it.
+| Mode | Module behavior | Loader behavior |
+|---|---|---|
+| `hold=0` (default) | Sets up 2.5G, leaves the QCA SFP callback unchanged; stock SFP recovery can change the port afterward | Existing boot-time clock verification and retry path; no EEPROM identity polling or persistent watcher |
+| `hold=1` (opt-in, Testing) | Wraps the QCA SFP `config_aneg` callback for the selected port so SFP events cannot undo SGMII+; exposes `pcs_link` | Checks the loaded mode and PCS capability, then monitors SFP identity and the real SerDes link with bounded recovery |
 
-Statistics readers that take no lock (for example `ethtool -S`) can still touch the port during the switch. Load the module at boot, as the boot script does, and avoid `rmmod`/`insmod` on a busy WAN.
+Without an opt-in flag, the loader does not add a `hold` argument or require a new
+instance lock; existing older modules remain usable through the default path.
+The QCA SFP callback stays unchanged in this mode, so an SFP reboot, replug or
+fiber return can revert the SerDes to 1G. This is not a verified working 1G
+fallback: the port remains excluded from polling and its speed cache is still
+2500. A link may have no working data path until a planned gateway reboot, and
+there is no watcher to repair it. Choose hold mode only if you need to suppress
+these changes and accept its current testing status.
+
+With `hold=1`, the module ignores `config_aneg` only for its own SSDK port while
+loaded (`suppressed` counts ignored calls). Calls for the other port are passed
+through. It installs the wrapper only if the callback still points at the expected
+QCA SFP function and removes its wrapper during cleanup. Because both cages share
+that driver callback, **at most one port may use hold mode at a time**. A second
+hold request is rejected before changing the hardware; that port gets no module,
+not an automatic default-mode instance. To use the other port in default mode,
+configure only the first port for hold. This combination is supported by the
+design, not yet dual-port hardware acceptance.
+
+Both modules take RTNL, stop MAC sync, pause active MIB work, then take the target
+PHY lock and qca-ssdk's config mutex before taking the mode snapshot. RTNL and the
+PHY lock exclude both stock `config_aneg` call paths in default mode too; this
+protection does not depend on installing the hold guard. The target MACs are taken
+down before switching the uniphy, followed by the vendor link-up sequence for
+2500 full duplex. Failures unwind acquired state without blindly
+switching hardware. These changes do not make every external statistics reader
+(for example `ethtool -S`) use the same lock.
+
+A previous live unload/reload under WAN traffic was followed by a SoC reset
+(`AHB Timeout`); its cause was not proven. Replacing a module file does not replace
+the running code, and older loaded versions lack the new locking. Install, update
+or roll back using a **planned gateway reboot**, rather than manual live
+unload/reload. Historical v4/v5.1 hardware results do not establish acceptance of
+the new default/hold combinations on either port.
 
 ### Port-to-module mapping
 
@@ -48,7 +85,7 @@ Statistics readers that take no lock (for example `ethtool -S`) can still touch 
 | `force_uniphy1_sgmiiplus` | 1 | 5 | eth6 | Port 7 (SFP+) | `20-sfp-sgmiiplus.sh` |
 | `force_uniphy2_sgmiiplus` | 2 | 6 | eth5 | Port 6 (SFP+) | `19-sfp-sgmiiplus-eth5.sh` |
 
-Loading both modules simultaneously is **not currently supported**. Each module independently saves and restores the full polling loop port bitmap. The second module to load would save the first module's already-modified bitmap as "original," corrupting the restore state. Supporting dual-port SGMII+ requires coordinated bitmap manipulation (each module toggling only its own port bit) — tracked as future work.
+Each module owns one port and restores only its own bitmap bit. The shared QCA SFP callback limits **hold mode** to one port; it does not impose a blanket ban on loading both modules. Concurrent operation and transitions on both ports still need hardware validation.
 
 ## SFP compatibility
 
@@ -69,7 +106,7 @@ Each module removes its target port from the SSDK's polling loop port bitmap. Th
 
 The bitmap exclusion is necessary because the loop reads link speed from a PPE hardware register that always reports 1000M for SGMII+ links (the SGMII in-band protocol has no 2.5G speed code). If the loop managed the port, it would force the MAC to 1G on every link-up event, creating a MAC/SerDes speed mismatch that kills the data path.
 
-Default port bitmap is `0x62` (ports 1, 5, 6). The uniphy1 module clears bit 5 (port 5 / eth6), the uniphy2 module clears bit 6 (port 6 / eth5). Only one module should be loaded at a time — see the dual-port caveat above.
+Default port bitmap is `0x62` (ports 1, 5, 6). The uniphy1 module clears bit 5 (port 5 / eth6), the uniphy2 module clears bit 6 (port 6 / eth5). Each module restores only its own bit, preserving the other port's membership. Only hold mode has the shared-hook restriction described above; do not load two hold instances.
 
 ### SSDK bookkeeping
 
@@ -77,7 +114,7 @@ Each module also writes to two SSDK internal data structures (per-port interface
 
 ### Version history
 
-v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5/eth6 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. v5 (current for eth6, see above) keeps SGMII+ across SFP events and switches uniphy1 under qca-ssdk's config mutex. If you are running v1, v2, or v3, upgrade.
+v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5/eth6 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. v5 uses a common implementation for both ports and switches under qca-ssdk's config mutex. The optional `hold=1` mode keeps SGMII+ across SFP events; `hold=0` preserves stock SFP recovery. If you are running v1, v2, or v3, upgrade.
 
 ### Symbol resolution
 
@@ -94,7 +131,7 @@ The module resolves these symbols from `qca-ssdk.ko` at load time. Their address
 | `ssdk_port_link_notify` | local (t) | kallsyms | Link state notifier chain |
 | `ubnt_send_phy_event` | local (t) | kallsyms | UniFi PHY event netlink notification |
 
-v5 (eth6) additionally resolves these by name and refuses to load if one of them is missing: `adpt_hppe_port_interface_mode_get`, `ssdk_dt_global_get_mac_mode`, `hsl_port_phydev_get`, `qca_ssdk_phydev_to_port`, `hppe_uniphy_channel0_input_output_6_get`, `qca_mac_port_status_init`, `sfp_phy_config_aneg`, `hsl_port_feature_get/set/clear`, `hppe_uniphy_channel0_force_speed_mode_set`, `adpt_hppe_port_txmac_status_set`, `adpt_hppe_port_rxmac_status_set`, `adpt_hppe_port_bridge_txmac_set`, `adpt_hppe_gcc_uniphy_clock_status_set`, `adpt_hppe_gcc_port_speed_clock_set`, `adpt_hppe_port_mac_speed_set`, `adpt_hppe_port_mac_duplex_set`, `adpt_hppe_uniphy_port_adapter_reset`, `qca_phy_mib_work_pause/resume`. It also relies on private qca-ssdk offsets (config mutex at `priv+0x990`, sync work at `priv+0x9b0`, MIB work at `priv+0x2a0`) and checks the work functions at those offsets (`qca_mac_sw_sync_work_task`, `qca_phy_mib_work_task`) before taking over; on a mismatch it does not load.
+The common v5 implementation uses the following additional symbols for guarded transitions and optional hold mode, resolving the required symbols by name rather than guessing addresses: `adpt_hppe_port_interface_mode_get`, `ssdk_dt_global_get_mac_mode`, `hsl_port_phydev_get`, `qca_ssdk_phydev_to_port`, `hppe_uniphy_channel0_input_output_6_get`, `qca_mac_port_status_init`, `sfp_phy_config_aneg`, `hsl_port_feature_get/set/clear`, `hppe_uniphy_channel0_force_speed_mode_set`, `adpt_hppe_port_txmac_status_set`, `adpt_hppe_port_rxmac_status_set`, `adpt_hppe_port_bridge_txmac_set`, `adpt_hppe_gcc_uniphy_clock_status_set`, `adpt_hppe_gcc_port_speed_clock_set`, `adpt_hppe_port_mac_speed_set`, `adpt_hppe_port_mac_duplex_set`, `adpt_hppe_uniphy_port_adapter_reset`, `qca_phy_mib_work_pause/resume`. It also relies on private qca-ssdk offsets (config mutex at `priv+0x990`, sync work at `priv+0x9b0`, MIB work at `priv+0x2a0`) and checks the work functions at those offsets (`qca_mac_sw_sync_work_task`, `qca_phy_mib_work_task`) before taking over; on a mismatch it does not load.
 
 | UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
 |---|---|---|
@@ -132,7 +169,7 @@ Note 6.0.5 shifts these addresses (the kernel and `qca-ssdk.ko` were both rebuil
 
 ³ UXG-Fiber, live. All ten addresses are identical to the 6.0.5 table above. See [compat-6.0.10.md](compat-6.0.10.md).
 
-The module resolves local symbols at runtime via `kallsyms_lookup_name()`, so it works across all tested OS versions without recompilation. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If any lookup fails, the module refuses to load rather than guessing an address.
+The module resolves local symbols at runtime via `kallsyms_lookup_name()`. The historical tables above describe earlier tested modules; they do not qualify the new default/hold modes on every listed OS version. Exported symbols (`ssdk_mac_sw_sync_work_stop`, `ssdk_mac_sw_sync_work_start`) are resolved by the kernel's normal module linker. If a required symbol lookup fails, the module refuses to load rather than guessing an address. Optional external notification symbols are used only when available.
 
 After loading, confirm the symbols resolved:
 
@@ -175,7 +212,7 @@ grep -E 'adpt_hppe_uniphy_mode_set|_adpt_hppe_port_interface_mode_set|ssdk_dt_gl
 
 ## Deployment
 
-The boot scripts run from `/data/on_boot.d/`, which requires udm-boot to be installed on your gateway. Without it, the scripts won't run on boot and you'll have to load the modules manually after every reboot. See [prerequisites.md](prerequisites.md) for install instructions.
+The boot scripts run from `/data/on_boot.d/`, which requires udm-boot to be installed on your gateway. Install it before deploying the modules so they load during boot. See [prerequisites.md](prerequisites.md) for instructions.
 
 The examples below show deployment for eth6 (Port 7). For eth5 (Port 6), substitute:
 - Module: `force_uniphy2_sgmiiplus.ko` instead of `force_uniphy1_sgmiiplus.ko`
@@ -183,7 +220,7 @@ The examples below show deployment for eth6 (Port 7). For eth5 (Port 6), substit
 - Log file: `/var/log/sfp-sgmiiplus-eth5.log` instead of `/var/log/sfp-sgmiiplus.log`
 - Clock path: `uniphy2_gcc_tx_clk` instead of `uniphy1_gcc_tx_clk`
 
-Both modules deploy to the same directory (`/data/sfp-sgmiiplus/`). Only one module should be loaded at a time — see the port bitmap caveat above.
+Both modules deploy to the same directory (`/data/sfp-sgmiiplus/`). Hold mode may be enabled for only one port; see [module modes](#module-modes).
 
 ### 1. Copy module to gateway
 
@@ -201,36 +238,78 @@ scp scripts/20-sfp-sgmiiplus.sh root@<gateway-ip>:/data/on_boot.d/
 ssh root@<gateway-ip> "chmod +x /data/on_boot.d/20-sfp-sgmiiplus.sh"
 ```
 
-### 3. Test run
+### 3. Choose the mode
+
+No flag is needed for the default setup. To opt one port into hold mode, create
+its flag before the planned reboot:
 
 ```bash
-# Load the module (expect a brief ~300ms link flap on eth6)
-ssh root@<gateway-ip> /data/on_boot.d/20-sfp-sgmiiplus.sh
+# On the gateway, choose ONE port:
+touch /data/sfp-sgmiiplus/hold-eth6   # eth6 / Port 7
+# OR: touch /data/sfp-sgmiiplus/hold-eth5   # eth5 / Port 6
+```
 
-# Check the log
+`/data/sfp-sgmiiplus/hold` is a global alternative for a single-port deployment.
+With both loaders installed, that global flag requests hold on both. Which
+loader claims the shared hook first is not deterministic; the other request is
+rejected and leaves that port without a module, rather than falling back to
+default mode. Use a port-specific flag instead. Flags select hold by their
+presence, not their contents. Change flags for the next planned gateway boot;
+recovery reruns retain the mode selected at startup. Flag edits do not change a
+running module or watcher.
+
+### 4. Verify copied files, then reboot
+
+Compare the module and loader checksums locally and on the gateway before the
+reboot. Use the matching module and script paths from the mapping above:
+
+```bash
+# Local files:
+sha256sum modules/force-uniphy1-sgmiiplus/force_uniphy1_sgmiiplus.ko scripts/20-sfp-sgmiiplus.sh
+# Copied files on the gateway:
+ssh root@<gateway-ip> 'sha256sum /data/sfp-sgmiiplus/force_uniphy1_sgmiiplus.ko /data/on_boot.d/20-sfp-sgmiiplus.sh'
+```
+
+Schedule a gateway reboot through the UniFi console. Do not run the loader
+manually to replace a currently loaded module. After the gateway returns, check:
+
+```bash
+ssh root@<gateway-ip> 'lsmod | grep force_uniphy1'
 ssh root@<gateway-ip> cat /var/log/sfp-sgmiiplus.log
-
-# Verify clock rate switched to 2.5G
 ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
-# Expected: 312500000
+# Expected clock after successful setup: 312500000
 ```
 
-### 4. Verify link
+For hold mode, also verify the effective mode and the real SerDes link:
 
 ```bash
-# Check module is loaded
-ssh root@<gateway-ip> lsmod | grep force_uniphy1
-
-# Verify clock rate - this is the real indicator
-ssh root@<gateway-ip> cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate
-# 312500000 = 2.5G, 125000000 = 1G
+# On the gateway; substitute force_uniphy2_sgmiiplus for eth5:
+P=/sys/module/force_uniphy1_sgmiiplus/parameters
+cat "$P/hold"       # Y or 1
+cat "$P/pcs_link"   # 1 when the host SerDes is linked
 ```
+
+The loader checks these capabilities after loading. If an old module does not
+accept or expose hold mode, the loader exits with status 1 and requests a planned
+gateway reboot with a matching module, rather than treating this as a transient
+clock failure and retrying. A legacy module that did load is left loaded; the
+capability failure does not trigger an unsafe live unload. Hold capability is not
+inferred by searching strings in the `.ko`. Older modules are supported without a
+hold flag.
+
+### Updating
+
+Replace the appropriate `.ko` and boot script using steps 1 and 2, compare their
+checksums as above, and reboot the gateway during a planned outage. The running
+module remains unchanged until the reboot. Do not use live `rmmod` / `insmod` to
+apply the new file: an old module's unload path may lack the current locking.
+Check the loaded mode, clock, link and loader log after the reboot.
 
 ### ethtool / UniFi Network speed reporting
 
 Each module updates ethtool, sysfs, UDAPI, and the UniFi Network dashboard to report 2.5G for its target interface. This works around a cosmetic limitation of SGMII in-band signaling - the protocol has no speed code for 2.5G, so the PPE hardware always reports 1000M for SGMII+ links.
 
-The fix writes to the SSDK's internal SFP PHY speed cache (the same cache that the "QCA SFP" fake PHY driver's `sfp_read_status()` copies into `phydev->speed`). The kernel's PHY state machine picks up the cached value within ~2 seconds, then a transient `RTM_NEWLINK` event (interface alias set/clear) signals `ubios-udapi-server` to re-read via ethtool.
+The fix writes to the SSDK's per-port SFP PHY speed cache (the same cache that the "QCA SFP" fake PHY driver's `sfp_read_status()` copies into `phydev->speed`) before resuming workers. After resume it schedules a transient `RTM_NEWLINK` event (interface alias set/clear) with a two-second delay, allowing the PHY state machine to copy the cached value before `ubios-udapi-server` re-reads ethtool. This is a reporting mechanism, not proof that traffic passes.
 
 After loading, all speed reporting paths should show 2500:
 
@@ -261,7 +340,7 @@ busybox devmem 0x07A20218 32
 
 ## Verification
 
-After a module loads (either manually or on boot):
+After the planned gateway reboot and boot-time module load:
 
 ```bash
 # Clock rate - the real speed indicator
@@ -293,13 +372,14 @@ The scripts handle this themselves. After each `insmod` they require the clock t
 momentary state. On a mismatch the script `rmmod`s to restore stock SGMII 1G, waits up
 to 30s for the stock 1G link to recover, backs off, and retries; 5 attempts total.
 
-Success is never judged on carrier, so SFPs that are hard-locked at 2.5G and cannot
-establish a 1G link still work. The eth5 script (v4) judges on the clock only; the eth6
-script (v5) also needs the SerDes link, see below.
+The default path judges success on the clock rather than carrier, so an SFP that
+cannot first establish a stock 1G link can still be configured for 2.5G. Hold mode
+also requires the SerDes link, as described below, on either port.
 
-If all five attempts fail, the module is removed and the port is left in stock SGMII 1G
-state, so the WAN keeps working at 1G instead of staying dead, and the script logs an
-ERROR and exits non-zero:
+If all five clock attempts fail, the loader removes the module, attempts to restore
+stock SGMII 1G, logs an ERROR and exits non-zero. A working data path still depends
+on the SFP and must be verified; a 1G clock or carrier alone does not prove traffic
+recovery. The following is an example of the bounded retry log:
 
 ```
 WARNING: Attempt 1 expected 312500000 Hz, got 125000000 Hz
@@ -317,48 +397,54 @@ unbounded loop would flap the WAN forever. Worst case the loop runs ~7 minutes a
 initial carrier wait, bouncing the port up to five times. It runs in the background, so
 `on_boot.d` is never blocked.
 
-### Boot script for eth6 (v5)
+### Optional hold monitoring (both ports)
 
-`20-sfp-sgmiiplus.sh` requires module v5.1 and its ordered-publication marker;
-it refuses the earlier v5 and v4 binaries. The vendor config strips version
-metadata (`CONFIG_MODULE_STRIPPED=y`), so the retained marker is used instead of
-`modinfo -F version`. On top of the retry above it:
+With a hold flag, the matching loader passes `hold=1` and checks the effective
+`hold` parameter (`Y` or `1`) and readable `pcs_link` after load. It does not require
+a particular binary string or module version marker. The `hold` parameter cannot
+be toggled at runtime; choose the mode for the next planned boot. Recovery
+re-execs retain the selected mode instead of applying later flag changes.
 
-- never takes over an empty cage, and checks the SFP identity (A0h bytes 20-83) again
-  before every `insmod`;
-- counts a load as good only if the clock holds for 45s *and* `pcs_link` comes up within
-  180s; without a 2.5G SerDes link it removes the module, and if the stock 1G link comes
-  back within 60s it marks that SFP as 1G-only until reboot;
-- keeps running as a watcher. A different SFP updates the remembered identity and
-  starts a fresh link-loss timeout; it does not reset an already working 2.5G link.
-  After 180s without `pcs_link` (also with an empty cage), the script removes the
-  module and starts a recovery run. A monotonic 360s limit since the last observed
-  PCS link prevents changing or unstable SFP identities from postponing recovery
-  indefinitely;
-- admits at most 3 automatic recovery runs in a rolling hour, using monotonic uptime.
-  This covers re-entry from the loaded watcher, stock-1G fallback and SFP changes.
-  The initial boot run does not count; each admitted run still has at most 5 load
+In hold mode, each loader:
+
+- waits for a nonempty cage and rechecks the SFP identity (A0h bytes 20-83) before
+  loading;
+- requires the clock to hold for 45s and the SerDes link to come up within 180s;
+  on failure it falls back to stock 1G and can remember a stick that only links at
+  1G until the next gateway boot;
+- watches SFP identity and PCS link without resetting an already working 2.5G link
+  merely because the identity changed;
+- starts recovery after 180s without PCS link, with a monotonic 360s hard limit
+  since the last observed link so unstable identities cannot postpone recovery;
+- admits at most three automatic recovery runs per rolling hour, using monotonic
+  uptime. The initial boot run does not count; each run has at most five load
   attempts. When the budget is full, the module stays off until an entry expires;
-- requires `flock` and a writable instance lock
-  (`/run/force_uniphy1_sgmiiplus.loader.lock`), held across re-exec. Without the lock
-  or a readable clock path, it exits before touching the module. Losing the clock
-  path during verification removes the module instead of declaring success.
+- requires a writable instance lock and `flock`, held across re-exec, plus a
+  readable clock path. A missing prerequisite stops hold setup; losing the clock
+  path during verification is not counted as success.
 
-Since v5 ignores the SFP auto-detect, an SFP reboot or a fiber pull usually does not reload
-the module: SGMII+ stays, and the link comes back when the SFP does. A stick that drops
-its host-side SerDes link for more than 180s (for example on loss of signal, or a slow
-reboot) does trigger one reload.
+With no flag, none of this EEPROM polling or persistent watching runs, and the
+loader retains its existing default clock retry path without an extra `flock`
+requirement. An SFP event may therefore revert the SerDes to 1G while the port is
+still excluded from polling and the speed cache stays at 2500. Working 1G traffic
+is not established by that reversion; the data path may remain unavailable until
+a planned gateway reboot.
 
-Deploy the v5.1 module before this script: it refuses earlier binaries without the
-ordered-publication marker and leaves eth6 at stock 1G.
+The shared QCA SFP callback permits only one active hold instance. Test the
+other-port default combination separately; common source code and own-bit bitmap
+restoration do not by themselves prove dual-port behavior on hardware.
 
-The mode and forced-speed snapshot is taken after the guard has drained old
-`config_aneg` calls, with sync work stopped and the SSDK config mutex held. Snapshot
-failures restore the callback and workers without switching the hardware; an abort
-logs whether link-setting requests were suppressed and may need reapplying. Callback
-publication uses a paired write/read barrier, including calls for the other SFP port.
+### Validation scope
 
-Host regression tests (Python 3, a C compiler and a POSIX shell):
+Hardware acceptance of the new mode split is pending: boot and SFP-event recovery
+on both ports, default mode alongside one hold port, planned-reboot rollback and
+24-hour operation. The earlier v5.1 results and historical OS tables are not a
+substitute for these checks. Build hashes and test results must come from the
+final artifacts; none are claimed here in advance.
+
+Host regression tests require Python 3, a C compiler, a POSIX shell and Git with
+baseline object `7775899` available for the actual legacy comparison; a missing
+baseline fails the tests explicitly rather than skipping the comparison:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/sfp-sgmiiplus -p 'test_*.py'
@@ -372,43 +458,56 @@ those still need the pinned kernel build and separate hardware acceptance.
 
 ## Reverting
 
-### Immediate (until next reboot)
+Use a planned gateway reboot for rollback. Do not unload a running module just to
+replace its file; an older version may switch hardware without the new locking.
 
-Unloading a module reverts its uniphy to SGMII 1G and restarts the MAC sync polling loop. On a busy WAN prefer a reboot without the boot script (see the v5 note above). For eth6, stop the watcher first so it does not load the module again (`pkill -f 20-sfp-sgmiiplus.sh`). If dmesg shows "config_aneg was replaced by someone else", do not unload the eth6 module; reboot instead:
+### Return to stock SGMII 1G
+
+On the gateway, move the boot script for the port you want to revert out of
+`on_boot.d`, keeping a fallback copy. Changing its extension alone is insufficient
+for boot services that execute every executable file:
 
 ```bash
-rmmod force_uniphy1_sgmiiplus   # eth6
-rmmod force_uniphy2_sgmiiplus   # eth5
+# eth6 / Port 7:
+mv /data/on_boot.d/20-sfp-sgmiiplus.sh /data/sfp-sgmiiplus/20-sfp-sgmiiplus.sh.disabled
+# eth5 / Port 6, if reverting that port too:
+# mv /data/on_boot.d/19-sfp-sgmiiplus-eth5.sh /data/sfp-sgmiiplus/19-sfp-sgmiiplus-eth5.sh.disabled
 ```
 
-Verify the revert:
+Reboot the gateway through the UniFi console during a planned outage. After boot,
+verify that the disabled port's module is absent and its clock is back at stock:
 
 ```bash
+lsmod | grep force_uniphy
 cat /sys/kernel/debug/clk/uniphy1_gcc_tx_clk/clk_rate   # eth6
 cat /sys/kernel/debug/clk/uniphy2_gcc_tx_clk/clk_rate   # eth5
-# Expected: 125000000
+# Reverted port: expected 125000000
 ```
 
-### Permanent
+Only check a port you reverted; another enabled module may still be running at
+2.5G. Keep module files and disabled scripts until rollback has been verified.
 
-Remove the boot script so it doesn't reload on next boot, then unload:
+### Turn off hold mode but retain boot-time 2.5G
+
+Remove the hold flag for the selected port and the global flag, if present. For
+example, for eth6:
 
 ```bash
-# eth6:
-rm /data/on_boot.d/20-sfp-sgmiiplus.sh
-pkill -f 20-sfp-sgmiiplus.sh
-rmmod force_uniphy1_sgmiiplus
-
-# eth5:
-rm /data/on_boot.d/19-sfp-sgmiiplus-eth5.sh
-rmmod force_uniphy2_sgmiiplus
+rm -f /data/sfp-sgmiiplus/hold-eth6 /data/sfp-sgmiiplus/hold
 ```
 
-Optionally clean up the module files:
+Leave the loader enabled and reboot during a planned outage. With the new module,
+`parameters/hold` should then report `N` or `0`. Removing a flag does not stop a
+running hold instance. For an earlier module without this parameter, check the
+clock and the default-path loader log instead.
 
-```bash
-rm -rf /data/sfp-sgmiiplus
-```
+### Restore an earlier module
+
+Copy your saved known-working `.ko` and matching loader back to their paths,
+verify the copied checksums, and reboot. Remove any hold flag for that port (and
+the global flag) before booting a module that does not support hold. Verify the
+clock, traffic and loader log afterward. Keep the fallback files until this check
+has passed.
 
 ## Cross-compiling
 
@@ -422,7 +521,7 @@ Ubiquiti does not publicly distribute kernel source. Your options are to extract
 
 ### Build
 
-For eth6, [`modules/force-uniphy1-sgmiiplus/build.sh`](../modules/force-uniphy1-sgmiiplus/build.sh) rebuilds the shipped `.ko` in a pinned `debian:trixie` image against a pinned QSDK kernel commit and checks the vermagic; the compiler comes from the current Debian packages and is only checked against the vendor version. Usage is in the script header. Manual build:
+The shared build script [`modules/sfp-sgmiiplus/build.sh`](../modules/sfp-sgmiiplus/build.sh) builds both port-specific `.ko` files by default in a pinned Debian image against a pinned QSDK kernel commit and checks the vermagic. The port-specific `build.sh` wrappers build only their respective module. The compiler comes from the current Debian packages and is only checked against the vendor version. Usage is in the shared script header. Manual build:
 
 ```bash
 # eth6 / Port 7:
@@ -434,4 +533,4 @@ cd modules/force-uniphy2-sgmiiplus/
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/kernel/source
 ```
 
-Since the modules resolve local symbols via `kallsyms_lookup_name()` at runtime, a rebuilt module should work across OS versions without address changes. After a firmware update, just verify the modules still load and resolve correctly via `dmesg`.
+Since the modules resolve local symbols via `kallsyms_lookup_name()` at runtime, a rebuilt module should work across OS versions without address changes. After a firmware update, verify the modules still load and resolve correctly via `dmesg`, then check the selected mode, clock, link and traffic. A successful build or host regression test is not hardware acceptance of either mode or a dual-port combination.
