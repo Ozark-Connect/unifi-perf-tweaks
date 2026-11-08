@@ -4,7 +4,7 @@
 **Modules:** [`modules/force-uniphy1-sgmiiplus/`](../modules/force-uniphy1-sgmiiplus/) (eth6), [`modules/force-uniphy2-sgmiiplus/`](../modules/force-uniphy2-sgmiiplus/) (eth5)
 **Compatibility:** UCG-Fiber / UXG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574)
 **Risk level:** Medium - kernel module, modifies SSDK internal state
-**Status:** Production
+**Status:** Production (eth6 v5: Testing)
 **Also known as:** HSGMII (Intel/Lantiq/MaxLinear terminology for the same 2.5G SerDes mode)
 
 ## Problem
@@ -30,6 +30,16 @@ Both modules (uniphy1 for eth6, uniphy2 for eth5) follow the same sequence:
 7. On unload (`rmmod`), restores the speed cache to its original value and reverts all state (uniphy mode, port interface mode, mac_mode, port bitmap), then restarts the polling loop with the full port set
 
 The mode set causes the target interface to flap briefly (~300ms) while the PLL relocks.
+
+### eth6 module v5
+
+The eth6 module (`force_uniphy1_sgmiiplus`, v5) adds three things to the sequence above. The eth5 module is still v4.
+
+- **Keeps SGMII+ across SFP events.** On SFP insert, SFP reboot and fiber return, `ubios-udapi-server`'s SFP auto-detect sets eth6 to 1000/autoneg-off and autoneg-on through ethtool. The "QCA SFP" fake PHY's `config_aneg` (`sfp_phy_config_aneg`) then re-applies the interface mode and switches uniphy1 back to SGMII 1G (with a 500 ms TX_DISABLE pulse). Port 5 is out of the polling loop, so nothing switches it back. v5 wraps the driver's `config_aneg` and ignores it for port 5 only while loaded (`suppressed` counts the ignored calls). The wrapper is installed only if the callback still points at `sfp_phy_config_aneg` and is removed on unload.
+- **Switches uniphy1 the way qca-ssdk does.** `adpt_hppe_uniphy_mode_set` resets uniphy1 for more than 100 ms and gates its port clocks. qca-ssdk only calls it under its config mutex (`adpt_hppe_port_interface_mode_apply`). v5 now loads and unloads the same way: MAC sync loop stopped, MIB counter work paused, config mutex held, port 5's MACs taken down first, then the vendor link-up sequence for 2500 full duplex (port speed clock, MAC speed and duplex, adapter reset, MACs on). Before this, one live `rmmod`/`insmod` under WAN traffic was followed by a SoC reset (`reset_reason: AHB Timeout`); the cause was not proven, and v4 and the eth5 module switch without the mutex too.
+- **Exposes the SerDes link.** `/sys/module/force_uniphy1_sgmiiplus/parameters/pcs_link` reads uniphy1's live link bit (1 up, 0 down, -1 unreadable), independent of the frozen link cache; the boot script uses it.
+
+Statistics readers that take no lock (for example `ethtool -S`) can still touch the port during the switch. Load the module at boot, as the boot script does, and avoid `rmmod`/`insmod` on a busy WAN.
 
 ### Port-to-module mapping
 
@@ -67,11 +77,11 @@ Each module also writes to two SSDK internal data structures (per-port interface
 
 ### Version history
 
-v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5/eth6 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 (current) adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. If you are running v1, v2, or v3, upgrade.
+v1 stopped the MAC sync polling loop entirely. This caused forwarding drops on eth5 and flow control loss during UniFi Network config pushes (IDS/IPS toggle, etc.), because the loop manages link state for all ports. v2 updated bookkeeping and restarted the loop, but the loop's link-up speed sync (reading 1000M from PPE) broke the 2.5G data path on cold starts (SFP reboot, gateway reboot, DSMP restart). v3 excludes port 5/eth6 from the bitmap, keeping the loop running for all other ports while preventing it from touching our SGMII+ port. v4 adds speed reporting: writes 2500 to the SSDK SFP PHY speed cache so ethtool/sysfs/UDAPI/UniFi Network all report 2.5G instead of the misleading 1000M. v5 (current for eth6, see above) keeps SGMII+ across SFP events and switches uniphy1 under qca-ssdk's config mutex. If you are running v1, v2, or v3, upgrade.
 
 ### Symbol resolution
 
-The module resolves three symbols from `qca-ssdk.ko` at load time. Their addresses change across UniFi OS versions even though the kernel stays the same - Ubiquiti ships a different `qca-ssdk.ko` build with each release:
+The module resolves these symbols from `qca-ssdk.ko` at load time. Their addresses change across UniFi OS versions even though the kernel stays the same - Ubiquiti ships a different `qca-ssdk.ko` build with each release:
 
 | Symbol | Type | Resolution | Purpose |
 |---|---|---|---|
@@ -83,6 +93,8 @@ The module resolves three symbols from `qca-ssdk.ko` at load time. Their address
 | `ssdk_phy_priv_data_get` | local (t) | kallsyms | SSDK private data (SFP PHY speed cache) |
 | `ssdk_port_link_notify` | local (t) | kallsyms | Link state notifier chain |
 | `ubnt_send_phy_event` | local (t) | kallsyms | UniFi PHY event netlink notification |
+
+v5 (eth6) additionally resolves these by name and refuses to load if one of them is missing: `adpt_hppe_port_interface_mode_get`, `ssdk_dt_global_get_mac_mode`, `hsl_port_phydev_get`, `qca_ssdk_phydev_to_port`, `hppe_uniphy_channel0_input_output_6_get`, `qca_mac_port_status_init`, `sfp_phy_config_aneg`, `hsl_port_feature_get/set/clear`, `hppe_uniphy_channel0_force_speed_mode_set`, `adpt_hppe_port_txmac_status_set`, `adpt_hppe_port_rxmac_status_set`, `adpt_hppe_port_bridge_txmac_set`, `adpt_hppe_gcc_uniphy_clock_status_set`, `adpt_hppe_gcc_port_speed_clock_set`, `adpt_hppe_port_mac_speed_set`, `adpt_hppe_port_mac_duplex_set`, `adpt_hppe_uniphy_port_adapter_reset`, `qca_phy_mib_work_pause/resume`. It also relies on private qca-ssdk offsets (config mutex at `priv+0x990`, sync work at `priv+0x9b0`, MIB work at `priv+0x2a0`) and checks the work functions at those offsets (`qca_mac_sw_sync_work_task`, `qca_phy_mib_work_task`) before taking over; on a mismatch it does not load.
 
 | UniFi OS | Kernel | `adpt_hppe_uniphy_mode_set` address |
 |---|---|---|
@@ -281,11 +293,12 @@ The scripts handle this themselves. After each `insmod` they require the clock t
 momentary state. On a mismatch the script `rmmod`s to restore stock SGMII 1G, waits up
 to 30s for the stock 1G link to recover, backs off, and retries; 5 attempts total.
 
-Success is judged on the clock only, never on carrier, so SFPs that are hard-locked at
-2.5G and cannot establish a 1G link still work.
+Success is never judged on carrier, so SFPs that are hard-locked at 2.5G and cannot
+establish a 1G link still work. The eth5 script (v4) judges on the clock only; the eth6
+script (v5) also needs the SerDes link, see below.
 
 If all five attempts fail, the module is removed and the port is left in stock SGMII 1G
-state — the WAN keeps working at 1G instead of staying dead — and the script logs an
+state, so the WAN keeps working at 1G instead of staying dead, and the script logs an
 ERROR and exits non-zero:
 
 ```
@@ -304,11 +317,33 @@ unbounded loop would flap the WAN forever. Worst case the loop runs ~7 minutes a
 initial carrier wait, bouncing the port up to five times. It runs in the background, so
 `on_boot.d` is never blocked.
 
+### Boot script for eth6 (v5)
+
+`20-sfp-sgmiiplus.sh` requires the v5 module and refuses an older one. On top of the
+retry above it:
+
+- never takes over an empty cage, and checks the SFP identity (A0h bytes 20-83) again
+  before every `insmod`;
+- counts a load as good only if the clock holds for 45s *and* `pcs_link` comes up within
+  180s; without a 2.5G SerDes link it removes the module, and if the stock 1G link comes
+  back within 60s it marks that SFP as 1G-only until reboot;
+- keeps running as a watcher and runs the load procedure again when a different SFP is
+  inserted, or after 180s without `pcs_link` (also with an empty cage), at most 3 times
+  per hour. Only one instance runs at a time (`/run/force_uniphy1_sgmiiplus.loader.lock`).
+
+Since v5 ignores the SFP auto-detect, an SFP reboot or a fiber pull usually does not reload
+the module: SGMII+ stays, and the link comes back when the SFP does. A stick that drops
+its host-side SerDes link for more than 180s (for example on loss of signal, or a slow
+reboot) does trigger one reload.
+
+Deploy the v5 module before the v5 script: the script refuses the v4 module and then
+leaves eth6 at stock 1G.
+
 ## Reverting
 
 ### Immediate (until next reboot)
 
-Unloading a module reverts its uniphy to SGMII 1G and restarts the MAC sync polling loop:
+Unloading a module reverts its uniphy to SGMII 1G and restarts the MAC sync polling loop. On a busy WAN prefer a reboot without the boot script (see the v5 note above). For eth6, stop the watcher first so it does not load the module again (`pkill -f 20-sfp-sgmiiplus.sh`). If dmesg shows "config_aneg was replaced by someone else", do not unload the eth6 module; reboot instead:
 
 ```bash
 rmmod force_uniphy1_sgmiiplus   # eth6
@@ -330,6 +365,7 @@ Remove the boot script so it doesn't reload on next boot, then unload:
 ```bash
 # eth6:
 rm /data/on_boot.d/20-sfp-sgmiiplus.sh
+pkill -f 20-sfp-sgmiiplus.sh
 rmmod force_uniphy1_sgmiiplus
 
 # eth5:
@@ -354,6 +390,8 @@ You need `aarch64-linux-gnu-gcc` (or any ARM64 cross-compiler) and a kernel sour
 Ubiquiti does not publicly distribute kernel source. Your options are to extract `/proc/config.gz` from the gateway (if available) and build a matching 5.4 source tree, or use a Docker-based cross-compilation environment with the extracted config.
 
 ### Build
+
+For eth6, [`modules/force-uniphy1-sgmiiplus/build.sh`](../modules/force-uniphy1-sgmiiplus/build.sh) rebuilds the shipped `.ko` in a pinned `debian:trixie` image against a pinned QSDK kernel commit and checks the vermagic; the compiler comes from the current Debian packages and is only checked against the vendor version. Usage is in the script header. Manual build:
 
 ```bash
 # eth6 / Port 7:
