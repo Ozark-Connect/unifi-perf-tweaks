@@ -309,9 +309,9 @@ initial carrier wait, bouncing the port up to five times. It runs in the backgro
 Some SFP sticks drop the PPPoE session when the port switches to 2.5G and stay silent
 for a while. pppd does not see that right away: it notices only after its LCP echo
 requests go unanswered, and until then the WAN looks up, so failover to a second WAN
-does not kick in. On one UCG-Fiber with a GPON stick (Luleey LL-XS2510, Telekom, PPPoE on VLAN 7) the
-stick was silent for about 60s after the switch, and pppd gave up after about 42s. IPv4
-was gone for that whole time.
+does not kick in. On one UCG-Fiber with a GPON stick (Luleey LL-XS2510, Telekom, PPPoE
+on VLAN 7) the stick was silent for about 60s after the switch, and pppd gave up after
+about 42s. IPv4 was gone for that whole time.
 
 With a flag file the script hangs up pppd with SIGHUP right before switching, so the
 session ends cleanly, failover starts at once, and pppd redials on its own:
