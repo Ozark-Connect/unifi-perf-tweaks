@@ -67,7 +67,7 @@ if [ -e "${PPPD_HUP_FILE}" ] || [ -e "${PPPD_HUP_FILE}-${IFACE}" ]; then
     # first run already restored. The kernel drops the lock when the holder
     # exits. "command exec" keeps dash running if the open fails.
     RUN_LOCK_FILE="/run/${SCRIPT_NAME}.lock"
-    if command -v flock >/dev/null 2>&1 && command exec 9>>"${RUN_LOCK_FILE}" 2>/dev/null; then
+    if command -v flock >/dev/null 2>&1 && { command exec 9>>"${RUN_LOCK_FILE}"; } 2>/dev/null; then
         flock -n 9
         rc=$?
         if [ $rc -eq 1 ]; then

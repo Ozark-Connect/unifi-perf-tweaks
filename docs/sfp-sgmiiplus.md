@@ -325,8 +325,9 @@ Without the file the scripts behave exactly as before. With it, the hangup only 
 when all of these hold right before the signal: exactly one pppd peer runs PPPoE on the
 port (or a VLAN on it), that peer has `persist`, the session is up with IPv4, and exactly
 one `pppd call pppN` process matches the PID file. During boot the script first waits up
-to 60s for the other on_boot.d scripts to finish. It hangs up at most once per run, and
-with the flag set only one run per port can be active at a time.
+to 60s for the other on_boot.d scripts to finish. It hangs up at most once per run. With
+the flag set, a lock keeps a second run on the same port out; if the lock cannot be taken
+(no `flock`, `/run` not writable), the run goes on without a hangup.
 
 On the setup above, IPv4 on the LAN dropped for about 3s instead of 45s, and traffic went
 over the second WAN until PPPoE came back 68 to 87s after the switch. That time depends
@@ -335,8 +336,10 @@ without the switch took about 6s.
 
 Only use it if your stick loses the session on the switch anyway. A new session usually
 means a new IPv4 address and a new delegated IPv6 prefix, so with a stick that keeps its
-session through the switch the hangup only adds a redial. If a retry switches the port
-again, that switch happens without a hangup and pppd falls back to its LCP timeout.
+session through the switch the hangup only adds a redial. Once the hangup has been sent,
+further retries in the same run switch without one, and pppd falls back to its LCP
+timeout. With the flag set, a run can take up to about 70s longer (boot wait and the
+wait for the session to end).
 
 To turn it off, remove the flag file.
 
