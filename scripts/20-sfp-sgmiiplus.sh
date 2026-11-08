@@ -28,9 +28,11 @@
 # loaded, so the script does it: success also needs the 2.5G SerDes link
 # (module parameter pcs_link) within LINK_TIMEOUT, otherwise the module is
 # removed and eth6 stays at stock SGMII 1G. After success the script keeps
-# watching eth6. A different SFP, or no 2.5G link for LINK_TIMEOUT (also with
-# an empty cage), removes the module and runs the load procedure again, at
-# most MAX_RERUNS times per hour. Only one instance runs at a time. An SFP that only links at 1G is remembered
+# watching eth6. A different SFP updates the watched identity without a live
+# reload while PCS is up. No 2.5G link for LINK_TIMEOUT (also with an empty
+# cage) removes the module and runs the load procedure again. All automatic
+# recovery entries share MAX_RERUNS runs per hour, each with MAX_ATTEMPTS
+# load attempts. Only one instance runs at a time. An SFP that only links at 1G is remembered
 # and left at 1G until it is replaced. An empty cage is never taken over.
 #
 # WARNING: This targets eth6 / Port 7 (the 2nd SFP+ port) ONLY.
@@ -125,7 +127,7 @@ watch_for_new_sfp() {
     else
         log "Watching ${IFACE} for a different SFP"
     fi
-    since=$(date +%s)
+    since=$(monotonic_seconds) || { log "ERROR: cannot read monotonic time"; exit 1; }
     while :; do
         sleep ${WATCH_INTERVAL}
         lsmod | grep -q "${MODULE_NAME}" && { log "Module was loaded by someone else; watcher stops"; exit 0; }
@@ -134,7 +136,8 @@ watch_for_new_sfp() {
             log "SFP changed to $(sfp_name); running the load procedure"
             exec "$0" --rerun "${RERUN_TIMES}"
         fi
-        if [ "${retry_secs}" -gt 0 ] && [ $(( $(date +%s) - since )) -ge "${retry_secs}" ]; then
+        now=$(monotonic_seconds) || { log "ERROR: cannot read monotonic time"; exit 1; }
+        if [ "${retry_secs}" -gt 0 ] && [ $((now - since)) -ge "${retry_secs}" ]; then
             log "Retrying 2.5G after ${retry_secs}s"
             exec "$0" --rerun "${RERUN_TIMES}"
         fi
@@ -151,19 +154,23 @@ case "$1" in
         ;;
 esac
 RERUN_TIMES="$2"
+RUN_MODE="$1"
 
 # One instance at a time, also across the re-exec of the watcher: fd 8 stays
 # open through exec, so a rerun keeps the lock it already holds.
-if command -v flock >/dev/null 2>&1; then
-    if [ "$1" != "--rerun" ] || ! { : >&8; } 2>/dev/null; then
-        if ! { command exec 8>>"${LOCK_FILE}"; } 2>/dev/null; then
-            log "WARNING: ${LOCK_FILE} not writable; running without the instance lock"
-        fi
+if ! command -v flock >/dev/null 2>&1; then
+    log "ERROR: flock is required; no module action taken"
+    exit 1
+fi
+if [ "$1" != "--rerun" ] || ! { : >&8; } 2>/dev/null; then
+    if ! { command exec 8>>"${LOCK_FILE}"; } 2>/dev/null; then
+        log "ERROR: ${LOCK_FILE} not writable; no module action taken"
+        exit 1
     fi
-    if { : >&8; } 2>/dev/null && ! flock -n 8; then
-        log "Another run is active (${LOCK_FILE} held). Nothing to do."
-        exit 0
-    fi
+fi
+if ! flock -n 8; then
+    log "Another run is active (${LOCK_FILE} held). Nothing to do."
+    exit 0
 fi
 
 # ─── Sanity checks ───
@@ -183,11 +190,50 @@ if ! lsmod | grep -q "qca_ssdk"; then
     exit 1
 fi
 
-# The module carries no usable version field in modinfo, so look for a v5 string
-if ! grep -q "config_aneg guard installed" "${MODULE_FILE}"; then
-    log "ERROR: ${MODULE_FILE} is not the v5 module; this script needs v5"
+# Require the ordered-publication implementation, not the older v5 binary.
+if ! grep -Fq "config_aneg guard installed (ordered publication)" "${MODULE_FILE}"; then
+    log "ERROR: ${MODULE_FILE} is not the ordered-publication v5.1 module; this script needs v5.1"
     exit 1
 fi
+
+if [ ! -r "${CLOCK_PATH}" ]; then
+    log "ERROR: ${CLOCK_PATH} not readable; cannot verify 2.5G, no module action taken"
+    exit 1
+fi
+
+# Monotonic seconds survive re-exec and are not affected by wall-clock changes.
+monotonic_seconds() {
+    read uptime ignored < /proc/uptime || return 1
+    case "${uptime%%.*}" in
+        ''|*[!0-9]*) return 1 ;;
+        *) echo "${uptime%%.*}" ;;
+    esac
+}
+
+# Every automatic entry shares this gate, including stock-1G watchers and
+# SFP changes. One recovery run may still make MAX_ATTEMPTS load attempts.
+admit_recovery() {
+    [ "${RUN_MODE}" = "--rerun" ] || return 0
+    now=$(monotonic_seconds) || { log "ERROR: cannot read monotonic time"; exit 1; }
+    recent=""
+    oldest=""
+    for t in ${RERUN_TIMES}; do
+        case "$t" in ''|*[!0-9]*) continue ;; esac
+        if [ $((now - t)) -lt 3600 ]; then
+            recent="${recent} ${t}"
+            [ -n "${oldest}" ] || oldest="$t"
+        fi
+    done
+    set -- ${recent}
+    if [ $# -ge ${MAX_RERUNS} ]; then
+        remaining=$((3600 - now + oldest))
+        log "Recovery budget (${MAX_RERUNS}/h) used up; leaving stock SGMII 1G for ${remaining}s"
+        sleep "${remaining}"
+        exec "$0" --rerun "${recent}"
+        exit 1
+    fi
+    RERUN_TIMES="${recent} ${now}"
+}
 
 # ─── Never take over an empty cage ───
 
@@ -234,8 +280,10 @@ fi
 
 # ─── Load and verify module ───
 
+admit_recovery
+
 BEFORE_CLOCK=""
-if [ -f "${CLOCK_PATH}" ]; then
+if [ -r "${CLOCK_PATH}" ]; then
     BEFORE_CLOCK=$(cat "${CLOCK_PATH}")
     log "Clock rate before: ${BEFORE_CLOCK} Hz"
 fi
@@ -262,13 +310,17 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
     # Give the mode set sequence time to complete (~300ms PLL relock + calibration)
     sleep 1
 
-    if [ ! -f "${CLOCK_PATH}" ]; then
-        log "WARNING: ${CLOCK_PATH} not found, cannot verify clock rate"
-        verified=1
-        break
+    if [ ! -r "${CLOCK_PATH}" ]; then
+        log "ERROR: ${CLOCK_PATH} disappeared; cannot verify clock rate"
+        remove_module
+        exit 1
     fi
 
-    AFTER_CLOCK=$(cat "${CLOCK_PATH}")
+    if ! AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null); then
+        log "ERROR: ${CLOCK_PATH} unreadable; cannot verify clock rate"
+        remove_module
+        exit 1
+    fi
     log "Clock rate after attempt ${attempt}: ${AFTER_CLOCK} Hz"
 
     # Clock is the success criterion, not carrier, so no-link 2.5G SFPs work.
@@ -278,7 +330,11 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
         while [ $held -lt $HOLD_SECS ]; do
             sleep 5
             held=$((held + 5))
-            AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null)
+            if [ ! -r "${CLOCK_PATH}" ] || ! AFTER_CLOCK=$(cat "${CLOCK_PATH}" 2>/dev/null); then
+                log "ERROR: ${CLOCK_PATH} unreadable during hold; cannot verify clock rate"
+                remove_module
+                exit 1
+            fi
             if [ "${AFTER_CLOCK}" != "312500000" ]; then
                 break
             fi
@@ -349,6 +405,7 @@ wait_pcs_link
 case $? in
     0)
         log "2.5G SerDes link up"
+        last_pcs_up=$(monotonic_seconds) || { log "ERROR: cannot read monotonic time"; remove_module; exit 1; }
         # Data path check, log only: without fiber no frames arrive either,
         # so this must not fall back to 1G on its own.
         rx0=$(cat /sys/class/net/${IFACE}/statistics/rx_packets 2>/dev/null)
@@ -397,32 +454,28 @@ while :; do
 
     now_id=$(sfp_id)
     reason=""
+    new_sfp=0
     if [ -n "${now_id}" ] && [ "${now_id}" != "${SFP_ID}" ]; then
-        reason="SFP changed to $(sfp_name)"
-    elif [ "$(pcs_link)" = "0" ]; then
-        nolink=$((nolink + WATCH_INTERVAL))
+        log "SFP changed to $(sfp_name); watching its 2.5G link without reloading"
+        SFP_ID="${now_id}"
+        nolink=0
+        # Start this SFP's timer at this observation, but retain the
+        # overall outage timer so unstable EEPROM identities cannot defer recovery.
+        new_sfp=1
+    fi
+    now=$(monotonic_seconds) || { log "ERROR: cannot read monotonic time"; remove_module; exit 1; }
+    if [ "$(pcs_link)" = "0" ]; then
+        nolink_total=$((now - last_pcs_up))
+        [ $new_sfp -eq 1 ] || nolink=$((nolink + WATCH_INTERVAL))
         [ $nolink -ge $LINK_TIMEOUT ] && reason="no 2.5G link for ${LINK_TIMEOUT}s"
+        [ $nolink_total -ge $((2 * LINK_TIMEOUT)) ] && reason="no 2.5G link for $((2 * LINK_TIMEOUT))s across SFP identities"
     else
         nolink=0
+        last_pcs_up="${now}"
     fi
     [ -z "${reason}" ] && continue
 
-    # Budget: at most MAX_RERUNS reruns per hour
-    now=$(date +%s)
-    recent=""
-    for t in ${RERUN_TIMES}; do
-        [ $((now - t)) -lt 3600 ] && recent="${recent} ${t}"
-    done
-    set -- ${recent}
-    if [ $# -ge ${MAX_RERUNS} ]; then
-        log "${reason}; rerun budget (${MAX_RERUNS}/h) used up, removing ${MODULE_NAME} and leaving stock SGMII 1G"
-        remove_module
-        # Watch from the SFP in the cage now, so a swap that used up the
-        # budget does not start the load procedure again right away
-        watch_for_new_sfp "${now_id:-${SFP_ID}}" 3600
-    fi
-
     log "${reason}; removing ${MODULE_NAME} and running the load procedure again"
     remove_module
-    exec "$0" --rerun "${recent} ${now}"
+    exec "$0" --rerun "${RERUN_TIMES}"
 done

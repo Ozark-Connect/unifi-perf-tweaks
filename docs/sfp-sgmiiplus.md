@@ -319,25 +319,56 @@ initial carrier wait, bouncing the port up to five times. It runs in the backgro
 
 ### Boot script for eth6 (v5)
 
-`20-sfp-sgmiiplus.sh` requires the v5 module and refuses an older one. On top of the
-retry above it:
+`20-sfp-sgmiiplus.sh` requires module v5.1 and its ordered-publication marker;
+it refuses the earlier v5 and v4 binaries. The vendor config strips version
+metadata (`CONFIG_MODULE_STRIPPED=y`), so the retained marker is used instead of
+`modinfo -F version`. On top of the retry above it:
 
 - never takes over an empty cage, and checks the SFP identity (A0h bytes 20-83) again
   before every `insmod`;
 - counts a load as good only if the clock holds for 45s *and* `pcs_link` comes up within
   180s; without a 2.5G SerDes link it removes the module, and if the stock 1G link comes
   back within 60s it marks that SFP as 1G-only until reboot;
-- keeps running as a watcher and runs the load procedure again when a different SFP is
-  inserted, or after 180s without `pcs_link` (also with an empty cage), at most 3 times
-  per hour. Only one instance runs at a time (`/run/force_uniphy1_sgmiiplus.loader.lock`).
+- keeps running as a watcher. A different SFP updates the remembered identity and
+  starts a fresh link-loss timeout; it does not reset an already working 2.5G link.
+  After 180s without `pcs_link` (also with an empty cage), the script removes the
+  module and starts a recovery run. A monotonic 360s limit since the last observed
+  PCS link prevents changing or unstable SFP identities from postponing recovery
+  indefinitely;
+- admits at most 3 automatic recovery runs in a rolling hour, using monotonic uptime.
+  This covers re-entry from the loaded watcher, stock-1G fallback and SFP changes.
+  The initial boot run does not count; each admitted run still has at most 5 load
+  attempts. When the budget is full, the module stays off until an entry expires;
+- requires `flock` and a writable instance lock
+  (`/run/force_uniphy1_sgmiiplus.loader.lock`), held across re-exec. Without the lock
+  or a readable clock path, it exits before touching the module. Losing the clock
+  path during verification removes the module instead of declaring success.
 
 Since v5 ignores the SFP auto-detect, an SFP reboot or a fiber pull usually does not reload
 the module: SGMII+ stays, and the link comes back when the SFP does. A stick that drops
 its host-side SerDes link for more than 180s (for example on loss of signal, or a slow
 reboot) does trigger one reload.
 
-Deploy the v5 module before the v5 script: the script refuses the v4 module and then
-leaves eth6 at stock 1G.
+Deploy the v5.1 module before this script: it refuses earlier binaries without the
+ordered-publication marker and leaves eth6 at stock 1G.
+
+The mode and forced-speed snapshot is taken after the guard has drained old
+`config_aneg` calls, with sync work stopped and the SSDK config mutex held. Snapshot
+failures restore the callback and workers without switching the hardware; an abort
+logs whether link-setting requests were suppressed and may need reapplying. Callback
+publication uses a paired write/read barrier, including calls for the other SFP port.
+
+Host regression tests (Python 3, a C compiler and a POSIX shell):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/sfp-sgmiiplus -p 'test_*.py'
+```
+
+The loader runs with isolated hardware stubs, including real re-execs and FD locks.
+The C tests compile the actual module source against a fake SSDK and check snapshot
+ordering, failed-takeover cleanup, rollback and the callback barrier protocol. These
+checks do not validate the vendor ABI, ARM memory-model outcomes or live switching;
+those still need the pinned kernel build and separate hardware acceptance.
 
 ## Reverting
 

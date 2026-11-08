@@ -61,7 +61,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ozark Connect");
 MODULE_DESCRIPTION("Force UCG-Fiber / UXG-Fiber uniphy1 to SGMII+ 2.5G");
-MODULE_VERSION("5");
+MODULE_VERSION("5.1");
 
 /* Exported by qca-ssdk.ko */
 extern int ssdk_mac_sw_sync_work_stop(unsigned int dev_id);
@@ -238,13 +238,17 @@ static int guarded_config_aneg(struct phy_device *phydev)
 	int ret;
 
 	atomic_inc(&guard_inflight);
+	/* The caller read our callback before entering here. Pair with the
+	 * write barrier before publishing that callback, also on eth5 where
+	 * the guard_active acquire below is deliberately skipped. */
+	smp_rmb();
 	if (phydev == READ_ONCE(guard_phydev) && smp_load_acquire(&guard_active)) {
 		atomic_inc(&guard_suppressed);
 		pr_info_ratelimited("force_sgmiiplus: SGMII+ kept, config_aneg on port %d ignored (autoneg %u, speed %d)\n",
 				    SSDK_PORT_ID, phydev->autoneg, phydev->speed);
 		ret = 0;
 	} else {
-		ret = orig_config_aneg(phydev);
+		ret = READ_ONCE(orig_config_aneg)(phydev);
 	}
 	atomic_dec(&guard_inflight);
 	return ret;
@@ -305,14 +309,17 @@ static int guard_install(void)
 
 	WRITE_ONCE(guard_phydev, phydev);
 	guard_drv = drv;
-	orig_config_aneg = drv->config_aneg;
+	WRITE_ONCE(orig_config_aneg, drv->config_aneg);
 	smp_store_release(&guard_active, 1);
+	/* Publish every wrapper dependency before the callback becomes callable.
+	 * guarded_config_aneg pairs this with smp_rmb(), including its eth5 path. */
+	smp_wmb();
 	WRITE_ONCE(drv->config_aneg, guarded_config_aneg);
 
 	/* A stock call that read the old pointer may still be running; let it
 	 * finish before the caller switches uniphy1 to SGMII+. */
 	flush_config_aneg_callers();
-	pr_info("force_sgmiiplus: config_aneg guard installed for port %d\n", SSDK_PORT_ID);
+	pr_info("force_sgmiiplus: config_aneg guard installed (ordered publication) for port %d\n", SSDK_PORT_ID);
 	return 0;
 }
 
@@ -513,12 +520,25 @@ static int __init force_sgmiiplus_init(void)
 	}
 	WRITE_ONCE(cfg_mutex, (struct mutex *)(priv_addr + PRIV_CFG_MUTEX));
 
+	ret = guard_install();
+	if (ret != 0) {
+		uniphy_mode_set = NULL;
+		return ret;
+	}
+
+	transition_begin();
+
+	/* The guard has drained old config_aneg calls, the sync work is stopped
+	 * and cfg_mutex is held. Snapshot one coherent stock state here, not
+	 * while auto-detect can still change its mode or forced-speed flag.
+	 * The 6.0.17 getters below (and their hsl helpers) only read memory;
+	 * they do not acquire cfg_mutex recursively. */
 	ret = port_iface_mode_get(DEV_ID, SSDK_PORT_ID, &orig_port_mode);
 	if (ret != 0) {
 		pr_err("force_sgmiiplus: reading port %d interface mode failed: %d\n",
 		       SSDK_PORT_ID, ret);
-		uniphy_mode_set = NULL;
-		return -EIO;
+		ret = -EIO;
+		goto abort_takeover;
 	}
 	orig_mac_mode = dt_global_get_mac_mode(DEV_ID, UNIPHY_INDEX);
 	pr_info("force_sgmiiplus: found port %d mode 0x%x, uniphy%d mac_mode 0x%x\n",
@@ -527,18 +547,10 @@ static int __init force_sgmiiplus_init(void)
 	    !(orig_port_mode == PORT_MODE_SGMII_BASET && orig_mac_mode == MAC_MODE_SGMII_CH0)) {
 		pr_err("force_sgmiiplus: port %d mode 0x%x / mac_mode 0x%x is not stock SGMII 1G, not taking over\n",
 		       SSDK_PORT_ID, orig_port_mode, orig_mac_mode);
-		uniphy_mode_set = NULL;
-		return -EBUSY;
+		ret = -EBUSY;
+		goto abort_takeover;
 	}
 	orig_force = port_feature_get(DEV_ID, SSDK_PORT_ID, PHY_F_FORCE) ? 1 : 0;
-
-	ret = guard_install();
-	if (ret != 0) {
-		uniphy_mode_set = NULL;
-		return ret;
-	}
-
-	transition_begin();
 
 	orig_port_bmp = port_bmp_get(DEV_ID);
 	bmp = orig_port_bmp & ~(1u << SSDK_PORT_ID);
@@ -570,11 +582,7 @@ static int __init force_sgmiiplus_init(void)
 		/* port is down; let the loop bring it up again from scratch */
 		port_status_init(DEV_ID, SSDK_PORT_ID);
 		port_bmp_set(DEV_ID, orig_port_bmp);
-		transition_end();
-		ssdk_mac_sw_sync_work_start(DEV_ID);
-		guard_remove();
-		uniphy_mode_set = NULL;
-		return ret;
+		goto abort_takeover;
 	}
 	pr_info("force_sgmiiplus: uniphy%d set to SGMII+ 2.5G\n", UNIPHY_INDEX);
 
@@ -643,6 +651,19 @@ static int __init force_sgmiiplus_init(void)
 	}
 
 	return 0;
+
+abort_takeover:
+	/* Snapshot failures have not changed hardware or the port bitmap. A
+	 * failed mode set has restored them above. Release cfg_mutex before
+	 * draining callback callers, which may need that same mutex. */
+	transition_end();
+	ssdk_mac_sw_sync_work_start(DEV_ID);
+	guard_remove();
+	if (atomic_read(&guard_suppressed))
+		pr_warn("force_sgmiiplus: takeover aborted after ignoring %d config_aneg request(s); stock link settings may need reapplying\n",
+			atomic_read(&guard_suppressed));
+	uniphy_mode_set = NULL;
+	return ret;
 }
 
 static void __exit force_sgmiiplus_exit(void)
