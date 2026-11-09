@@ -18,7 +18,24 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ozark Connect");
 MODULE_DESCRIPTION("Force UCG-Fiber / UXG-Fiber " SGMII_IFACE " to SGMII+ 2.5G");
-MODULE_VERSION("5");
+#define SGMIIPLUS_VERSION "5"
+MODULE_VERSION(SGMIIPLUS_VERSION);
+
+/*
+ * The vendor kernel strips modinfo (CONFIG_MODULE_STRIPPED), so MODULE_VERSION
+ * leaves no /sys/module/<module>/version there. Parameters are kept; this
+ * read-only one names the loaded build.
+ */
+static int param_get_version(char *buf, const struct kernel_param *kp)
+{
+	return sprintf(buf, "%s\n", SGMIIPLUS_VERSION);
+}
+
+static const struct kernel_param_ops version_ops = {
+	.get = param_get_version,
+};
+module_param_cb(version, &version_ops, NULL, 0444);
+MODULE_PARM_DESC(version, "Module build version");
 
 static bool hold;
 module_param(hold, bool, 0444);

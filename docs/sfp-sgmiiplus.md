@@ -34,8 +34,12 @@ The mode set causes the target interface to flap briefly (~300ms) while the PLL 
 ### Module modes
 
 Both port-specific module names are retained and share one implementation to keep
-behavior consistent. Both sources declare `MODULE_VERSION("5")`; the vendor
-`CONFIG_MODULE_STRIPPED` setting can remove this metadata from the built module.
+behavior consistent. Both sources declare `MODULE_VERSION("5")`, but the vendor
+kernel strips modinfo (`CONFIG_MODULE_STRIPPED`), so the built `.ko` carries no
+version field and `/sys/module/<module>/version` does not exist. Module
+parameters are not stripped: the read-only `version` parameter reports the
+loaded build (`cat /sys/module/<module>/parameters/version`, currently `5`).
+If that file is missing, the loaded module is older than this build.
 The `hold` parameter is set at load time and is read-only afterward:
 
 | Mode | Module behavior | Loader behavior |
@@ -285,6 +289,7 @@ For hold mode, also verify the effective mode and the real SerDes link:
 ```bash
 # On the gateway; substitute force_uniphy2_sgmiiplus for eth5:
 P=/sys/module/force_uniphy1_sgmiiplus/parameters
+cat "$P/version"    # 5; a missing file means an older module is loaded
 cat "$P/hold"       # Y or 1
 cat "$P/pcs_link"   # 1 when the host SerDes is linked
 ```

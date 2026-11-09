@@ -319,6 +319,8 @@ int main(int argc, char **argv)
         char buf[32]; sim.reading_pcs = 1;
         assert(param_get_pcs_link(buf, NULL) > 0 && !strcmp(buf, "1\n"));
         sim.reading_pcs = 0;
+        assert(param_get_version(buf, NULL) == (int)strlen(SGMIIPLUS_VERSION) + 1);
+        assert(!strcmp(buf, SGMIIPLUS_VERSION "\n"));
         int before_touched = sim.touched, before_set_calls = sim.set_calls;
         int before_calls = sim.calls;
         bool changed = !strcmp(name, "exit_stock_baset") || !strcmp(name, "exit_stock_fiber");
@@ -376,6 +378,13 @@ class ModuleTestCases:
     def scenario(self, name, mode=1):
         result = subprocess.run([str(self.binary), name, str(mode)], text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_version_is_a_read_only_parameter(self):
+        # The mock compiles module_param_cb away, so check the registration in the source.
+        source = Path(os.environ.get("MODULE_SOURCE", SOURCE)).read_text()
+        self.assertRegex(source, r'module_param_cb\(version,\s*&version_ops,\s*NULL,\s*0444\);')
+        self.assertRegex(source, r'MODULE_VERSION\(SGMIIPLUS_VERSION\);')
+        self.assertNotRegex(source, r'version_ops\s*=\s*\{[^}]*\.set')
 
     def test_default_keeps_stock_callback_and_reports_pcs(self): self.scenario("normal", 0)
     def test_hold_keeps_target_and_delegates_other_port(self): self.scenario("normal", 1)
