@@ -52,7 +52,7 @@ cat /run/ipv6-prefix-deprecation/status.json
 journalctl -u ipv6-prefix-deprecation -n 20
 ```
 
-`status.json` shows one of four states: `waiting` (no LAN prefix yet, for example while the WAN is down), `ready` (tracking prefixes), `deprecating` (old prefixes are being tracked for deprecation; sending pauses while the gateway has no IPv6 default route) or `error`. After a prefix change the journal shows one line per bridge, for example `br0: <old>/64 replaced by <new>/64, deprecating`.
+`status.json` shows one of four states: `waiting` (no LAN prefix yet, for example while the WAN is down; `networks` 0 with the journal line `no ra-only network found` means no LAN uses `ra-only`, or the dnsmasq layout is not the expected one, see below), `ready` (tracking prefixes), `deprecating` (old prefixes are being tracked for deprecation; sending pauses while the gateway has no IPv6 default route) or `error`. After a prefix change the journal shows one line per bridge, for example `br0: <old>/64 replaced by <new>/64, deprecating`.
 
 On a client, the old addresses should turn deprecated within seconds after the new prefix appears: `ip -6 addr` on Linux shows `preferred_lft 0sec`, `ifconfig` on macOS shows `deprecated`. Linux keeps them valid for up to 2 more hours; that is the two-hour rule in RFC 4862, and the addresses are no longer used for new connections.
 
@@ -80,11 +80,11 @@ After a firmware update, these are the parts the script relies on:
 - The delegated prefixes as dynamic global /64 addresses on the LAN bridges, shown by `ip -j -6 addr show`.
 - dnsmasq running under the process name `dnsmasq`.
 
-If one of them changes, the daemon finds no networks or prefixes to track and sends nothing.
+If one of them changes, the daemon finds no networks or prefixes to track and sends nothing. For the dnsmasq configuration it logs `no ra-only network found in the dnsmasq configuration` after a minute without any network. Unexpected input is logged with a traceback and reported as `error` in `status.json` instead of crashing the daemon; after a minute of such errors in a row it drops the saved prefix state once. If it still exits, systemd restarts it after 60 seconds. At boot the boot script logs its own failures and exits 0, so it does not fail `udm-boot`; run by hand it exits 1 on failure.
 
 ## Limitations
 
-- Only SLAAC networks are covered. Networks where dnsmasq runs stateful DHCPv6 are skipped and logged.
+- Only networks dnsmasq serves with `ra-only` (SLAAC without DHCPv6) are covered. Other RA modes, including stateful DHCPv6 and `slaac`/`ra-stateless`/`ra-names`, are skipped and logged.
 - A prefix the daemon never saw, for example from before the first install, is not deprecated.
 - Tested on one UCG-Fiber with one ISP and with macOS and Linux clients. Windows, Android and iOS were not tested. There is no model check; other gateways with `python3` and the same dnsmasq layout should work but are untested.
 - The handling of large clock steps (for example NTP correcting the clock after boot) is covered by unit tests, not by a live test.

@@ -30,12 +30,23 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
 }
 
+# Exit after a logged failure. At boot (udm-boot still activating) exit 0: this tweak is
+# optional, and a non-zero exit fails the udm-boot unit, which makes systemd kill the
+# background loaders other boot scripts may still be running (for example 19/20 SGMII+).
+# Run by hand or by a deploy tool, exit 1 so the caller sees the failure.
+fail_exit() {
+    if [ "$(systemctl is-active udm-boot.service 2>/dev/null)" = "activating" ]; then
+        exit 0
+    fi
+    exit 1
+}
+
 if ! command -v python3 >/dev/null 2>&1; then
     log "python3 not found, not installing."
-    exit 1
+    fail_exit
 fi
 
-mkdir -p "$DIR" || { log "Creating $DIR failed."; exit 1; }
+mkdir -p "$DIR" || { log "Creating $DIR failed."; fail_exit; }
 chmod 700 "$DIR"
 
 # Writes stdin to $1 (mode $2) only when the content differs, so a reboot writes nothing to
@@ -87,6 +98,7 @@ import subprocess
 import sys
 import time
 import glob
+import traceback
 
 STATE_FILE = "/data/ipv6-prefix-deprecation/state.json"
 RUN_DIR = "/run/ipv6-prefix-deprecation"
@@ -114,6 +126,8 @@ CMD_TIMEOUT_S = 5
 # A wall clock step beyond this between two polls (NTP after boot) shifts all stored times.
 CLOCK_STEP_S = 60
 ERROR_REPORT_POLLS = 2
+EMPTY_LOG_POLLS = 20        # polls without any ra-only network before that is logged (60 s)
+UNEXPECTED_RESET_POLLS = 20  # polls in a row with an unexpected error before the state is dropped
 INFINITE = 0xFFFFFFFF
 GUA = ipaddress.ip_network("2000::/3")
 
@@ -475,6 +489,15 @@ def load_state():
         return None
 
 
+def tracker_from_state(state):
+    """A Tracker from the saved state, or an empty one if the state has an unexpected shape."""
+    try:
+        return Tracker(state)
+    except (AttributeError, TypeError, KeyError, ValueError) as e:
+        log(f"saved state unreadable, starting empty: {e!r}")
+        return Tracker(None)
+
+
 def main():
     dry_run = "--dry-run" in sys.argv
     os.makedirs(RUN_DIR, exist_ok=True)
@@ -484,11 +507,13 @@ def main():
     except OSError:
         log("another instance is running")
         return 1
-    tracker = Tracker(None if dry_run else load_state())
+    tracker = tracker_from_state(None if dry_run else load_state())
     log(f"started{' (dry-run)' if dry_run else ''}, tracking {sum(len(s['current']) for s in tracker.bridges.values())}"
         f" prefixes, deprecating {tracker.counts()}")
     last_skipped, last_error, error_polls, save_failed = None, None, 0, False
     last_pause = None
+    empty_polls, logged_empty = 0, False
+    unexpected_polls, state_reset = 0, False
     status, status_written = None, 0.0
     last_send_wall = None
     while True:
@@ -501,6 +526,18 @@ def main():
                 for reason in skipped:
                     log(f"skipped {reason}")
                 last_skipped = skipped
+            # Nothing to watch and nothing skipped for a minute: no LAN with ra-only, or, after
+            # a firmware update, a changed dnsmasq layout. Not logged for a short gap at boot
+            # or during a dnsmasq rewrite.
+            if bridges or skipped:
+                if logged_empty:
+                    log("ra-only networks found again")
+                empty_polls, logged_empty = 0, False
+            else:
+                empty_polls += 1
+                if empty_polls >= EMPTY_LOG_POLLS and not logged_empty:
+                    log("no ra-only network found in the dnsmasq configuration, nothing to watch")
+                    logged_empty = True
             snap, present = parse_addrs(run_ip("-6", "addr", "show"), bridges)
             due = tracker.update(bridges, snap, present, now, mono)
             pause = None
@@ -524,6 +561,24 @@ def main():
         except (OSError, subprocess.SubprocessError, ValueError) as e:
             error = f"snapshot failed: {e!r}"
             tracker.lost_sight()
+            unexpected_polls = 0
+        except Exception as e:  # unexpected input, e.g. a changed `ip -j` format
+            # Report it like a failed snapshot instead of crashing: a crash restarts the
+            # daemon every RestartSec with a traceback in the journal each time.
+            error = f"unexpected error: {e!r}"
+            if error != last_error:
+                log(traceback.format_exc().rstrip())
+            tracker.lost_sight()
+            unexpected_polls += 1
+            # A saved state that passed the constructor but breaks every update would stop
+            # all deprecation for good. Drop it once; a cause outside the state stays reported.
+            if unexpected_polls >= UNEXPECTED_RESET_POLLS and not state_reset:
+                log(f"{unexpected_polls} polls in a row failed unexpectedly, dropping the saved prefix state")
+                tracker = Tracker(None)
+                tracker.dirty = True
+                state_reset = True
+        else:
+            unexpected_polls = 0
         if error != last_error:
             if error:
                 log(error)
@@ -566,7 +621,7 @@ if __name__ == "__main__":
 PYEOF
 ); then
     log "Writing $DAEMON failed."
-    exit 1
+    fail_exit
 fi
 
 if ! UNIT_CHANGED=$(install_if_changed "$UNIT" 644 <<'EOF'
@@ -578,7 +633,7 @@ StartLimitIntervalSec=0
 [Service]
 ExecStart=/usr/bin/env python3 -u /data/ipv6-prefix-deprecation/ipv6-prefix-deprecation.py
 Restart=always
-RestartSec=10
+RestartSec=60
 Nice=10
 RuntimeDirectory=ipv6-prefix-deprecation
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
@@ -593,7 +648,7 @@ WantedBy=multi-user.target
 EOF
 ); then
     log "Writing $UNIT failed."
-    exit 1
+    fail_exit
 fi
 
 # A changed file needs a reload and restart. Remember that on tmpfs until it succeeded, so
@@ -601,24 +656,24 @@ fi
 # running. A reboot starts the new files anyway, so the marker may vanish with /run.
 if [ -n "$DAEMON_CHANGED$UNIT_CHANGED" ] && ! : > "$PENDING"; then
     log "Writing $PENDING failed."
-    exit 1
+    fail_exit
 fi
 if [ -f "$PENDING" ]; then
     ACTION=restart
     if ! systemctl daemon-reload; then
         log "systemctl daemon-reload failed."
-        exit 1
+        fail_exit
     fi
 else
     ACTION=start
 fi
 if ! systemctl enable ipv6-prefix-deprecation >/dev/null 2>&1; then
     log "Enabling the service failed."
-    exit 1
+    fail_exit
 fi
 if ! systemctl "$ACTION" ipv6-prefix-deprecation; then
     log "systemctl $ACTION failed: $(journalctl -u ipv6-prefix-deprecation -n 3 -o cat --no-pager 2>/dev/null | tr '\n' ' ')"
-    exit 1
+    fail_exit
 fi
 rm -f "$PENDING"
 
@@ -627,5 +682,5 @@ if systemctl is-active --quiet ipv6-prefix-deprecation; then
     log "Service active."
 else
     log "Service failed to start: $(journalctl -u ipv6-prefix-deprecation -n 3 -o cat --no-pager 2>/dev/null | tr '\n' ' ')"
-    exit 1
+    fail_exit
 fi

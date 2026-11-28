@@ -310,6 +310,15 @@ class TrackerFlow(unittest.TestCase):
         self.assertEqual(due, {"br0": ([OLD], ["2001:db8:0:100::1"])})
         self.assertEqual(d.Tracker({"version": 99, "bridges": {"br0": {}}}).bridges, {})
 
+    def test_malformed_state_starts_empty(self):
+        import contextlib
+        import io
+        for bad in ({"version": d.STATE_VERSION, "bridges": ["br0"]},
+                    {"version": d.STATE_VERSION, "bridges": {"br0": {"current": ["x"]}}},
+                    {"version": d.STATE_VERSION, "bridges": {"br0": None}}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(d.tracker_from_state(bad).bridges, {}, bad)
+
     def test_renewal_writes_rarely(self):
         # The bridge's remaining valid lifetime counts down and jumps up by 900 s on each
         # renewal (T1 900): the expiry grows in 900 s steps, written once it passes 3600 s.
@@ -335,7 +344,7 @@ class Installer(unittest.TestCase):
             os.mkdir(os.path.join(self.tmp, sub))
         self.log = os.path.join(self.tmp, "systemctl.log")
         mocks = {
-            "systemctl": '#!/bin/sh\necho "$*" >> "%s"\n[ "$1" = "$FAIL" ] && exit 1\nexit 0\n' % self.log,
+            "systemctl": '#!/bin/sh\n[ "$1" = is-active ] && [ "$2" = udm-boot.service ] && { echo "${UDM_BOOT:-active}"; exit 0; }\necho "$*" >> "%s"\n[ "$1" = "$FAIL" ] && exit 1\nexit 0\n' % self.log,
             "journalctl": "#!/bin/sh\nexit 0\n",
             "sleep": "#!/bin/sh\nexit 0\n",
         }
@@ -353,14 +362,14 @@ class Installer(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp)
 
-    def run_script(self, text, fail=""):
+    def run_script(self, text, fail="", udm_boot="active"):
         import subprocess
         path = os.path.join(self.tmp, "boot.sh")
         with open(path, "w") as f:
             f.write(text)
         if os.path.exists(self.log):
             os.remove(self.log)
-        env = dict(os.environ, PATH=os.path.join(self.tmp, "bin") + ":" + os.environ["PATH"], FAIL=fail)
+        env = dict(os.environ, PATH=os.path.join(self.tmp, "bin") + ":" + os.environ["PATH"], FAIL=fail, UDM_BOOT=udm_boot)
         rc = subprocess.run(["bash", path], env=env, capture_output=True).returncode
         calls = open(self.log).read().split("\n") if os.path.exists(self.log) else []
         return rc, calls
@@ -377,6 +386,7 @@ class Installer(unittest.TestCase):
         updated = self.base.replace("\nPYEOF\n", "\n# changed\nPYEOF\n", 1)
         rc, calls = self.run_script(updated, fail="restart")
         self.assertEqual(rc, 1)
+        self.assertTrue(self.pending())
 
         rc, calls = self.run_script(updated)
         self.assertEqual(rc, 0)
@@ -388,6 +398,12 @@ class Installer(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("start ipv6-prefix-deprecation", calls)
         self.assertNotIn("daemon-reload", calls)
+
+    def test_failure_at_boot_does_not_fail_udm_boot(self):
+        updated = self.base.replace("\nPYEOF\n", "\n# changed\nPYEOF\n", 1)
+        rc, calls = self.run_script(updated, fail="restart", udm_boot="activating")
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.pending())
 
 
 if __name__ == "__main__":
