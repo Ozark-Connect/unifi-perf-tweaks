@@ -1,9 +1,10 @@
 # UniFi OS 6.0.19 Compatibility Verification
 
-**Result: compatible on UCG-Fiber and UXG-Fiber.** UCG-Fiber: static check of its image and a read-only live check on a production UCG-Fiber with SSD (08 + 09 + 15), on 2026-11-24. UXG-Fiber: static check of its own image and a read-only live check on a production UXG-Fiber (SGMII+ + 10 + 15), on 2026-11-28.
+**Result: compatible on UCG-Fiber, UXG-Fiber and UXG-Max.** UCG-Fiber: static check of its image and a read-only live check on a production UCG-Fiber with SSD (08 + 09 + 15), on 2026-11-24. UXG-Fiber: static check of its own image and a read-only live check on a production UXG-Fiber (SGMII+ + 10 + 15), on 2026-11-28. UXG-Max: static check of its own image, on 2026-11-28.
 
 - [UCG-Fiber](#ucg-fiber)
 - [UXG-Fiber](#uxg-fiber)
+- [UXG-Max](#uxg-max)
 
 ## UCG-Fiber
 
@@ -110,3 +111,24 @@ Read-only, on a production UXG-Fiber. It booted 6.0.19 at 16:14:44 UTC, and the 
 | 06 to 09 | N/A |
 
 Working files: `~/fw-6019-uxgf/` on the NAS.
+
+## UXG-Max
+
+| | |
+|---|---|
+| Build | `UXGB.ipq5322.v6.0.19.a29a5cc.261125.1443` |
+| `.bin` md5 | `7579a64f627eca1a35221b703fb61d81` (338,739,142 bytes) |
+| Rootfs | zstd squashfs at offset `15749302` |
+| Kernel | `5.4.213-ui-ipq5322` |
+| Baseline | UXG-Max 6.0.17 image. UXG-Fiber 6.0.19 image (same release) |
+
+| Tweak | Static (UXG-Max image) |
+|---|---|
+| 19 + 20 SGMII+ | N/A. The modules are built for `5.4.213-ui-ipq9574` and do not load on the `ipq5322` kernel |
+| 06 to 09, `mongodb-ssd-decommission.sh` | N/A. No `mongod` and no PostgreSQL `14-apps` cluster. The scripts exit at their model check |
+| 10 journald | ✓ `journald.conf` and `syslog-ng/` identical to UXG-Max 6.0.17. Against UXG-Fiber 6.0.19, `vpn_bonding_log.conf` is absent, as on 6.0.17 |
+| 15 fan | ✓ `ufcd`, `uhwd`, `ufcd.service` and all 12 `statusdb` modules byte-identical to UXG-Fiber 6.0.19, where script 15 ran live. `ustd` is the same 6.0.11 rebuild (`1fce2ea5`) |
+
+Every package common to the UXG-Max and UXG-Fiber 6.0.19 images has the same version; the differences are the SoC and board packages. `ubnt-device-info` still carries `model_short`. As in 6.0.17, no UXG-Max stock fan setpoints are on record.
+
+Working files: `~/fw-6019-uxgmax/` on the NAS.
