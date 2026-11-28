@@ -23,7 +23,7 @@
 # WAN device: the physical PPPoE receive device, WAN_DEV below or the first
 # line of /data/pppoe-gro/wan_dev (e.g. eth6, not eth6.7).
 # Revert: stop downloads, rmmod pppoe_gro; or create the disable file.
-# Target: UCG-Fiber, UniFi OS 6.0.11, 6.0.12, 6.0.15, 6.0.16, 6.0.17, kernel 5.4.213-ui-ipq9574, module v0.4
+# Target: UCG-Fiber, UniFi OS 6.0.11, 6.0.12, 6.0.15, 6.0.16, 6.0.17, 6.0.19, kernel 5.4.213-ui-ipq9574, module v0.4
 
 SCRIPT_NAME="pppoe-gro"
 BASE_DIR="/data/pppoe-gro"
@@ -52,6 +52,7 @@ VERIFIED_BUILDS='
 #5.4.213 SMP PREEMPT Thu Oct 22 17:59:40 CST 2026|e4196f81c6df6b2367587267203835f0d36f445470b22ccfdff87b5abd361260|a40760e023b9b9f0da2bd760ac6ef7f81a4694a04c6327e61ca30e7d67c60bae|7206e0e2fae2c91a0183001e276cbd97f99d2635cdebcd69dd7b99447001210a
 #5.4.213 SMP PREEMPT Wed Oct 28 10:48:38 CST 2026|e4196f81c6df6b2367587267203835f0d36f445470b22ccfdff87b5abd361260|a40760e023b9b9f0da2bd760ac6ef7f81a4694a04c6327e61ca30e7d67c60bae|7206e0e2fae2c91a0183001e276cbd97f99d2635cdebcd69dd7b99447001210a
 #5.4.213 SMP PREEMPT Tue Nov 3 11:27:33 CST 2026|e4196f81c6df6b2367587267203835f0d36f445470b22ccfdff87b5abd361260|a40760e023b9b9f0da2bd760ac6ef7f81a4694a04c6327e61ca30e7d67c60bae|7206e0e2fae2c91a0183001e276cbd97f99d2635cdebcd69dd7b99447001210a
+#5.4.213 SMP PREEMPT Thu Nov 19 22:30:58 CST 2026|e4196f81c6df6b2367587267203835f0d36f445470b22ccfdff87b5abd361260|a40760e023b9b9f0da2bd760ac6ef7f81a4694a04c6327e61ca30e7d67c60bae|7206e0e2fae2c91a0183001e276cbd97f99d2635cdebcd69dd7b99447001210a
 '
 EXP_MODULE_SHA="2acd7a1b7921364a2460670d06c382a7f6772faf7e7508431f696da454567875"  # pppoe_gro.ko v0.4 (modules/pppoe-gro/build.sh)
 

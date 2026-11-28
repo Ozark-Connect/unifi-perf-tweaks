@@ -2,7 +2,7 @@
 
 **Script:** [`scripts/25-pppoe-gro.sh`](../scripts/25-pppoe-gro.sh)
 **Module:** [`modules/pppoe-gro/`](../modules/pppoe-gro/) (GPL-2.0, see its `LICENSE`)
-**Compatibility:** UCG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574), UniFi OS 6.0.11, 6.0.12, 6.0.15, 6.0.16 and 6.0.17 builds (see [After a firmware update](#after-a-firmware-update))
+**Compatibility:** UCG-Fiber (IPQ9574, kernel 5.4.213-ui-ipq9574), UniFi OS 6.0.11, 6.0.12, 6.0.15, 6.0.16, 6.0.17 and 6.0.19 builds (see [After a firmware update](#after-a-firmware-update))
 **Risk level:** Medium - kernel module bound to one kernel build, touches the receive path of every WAN packet
 **Status:** Testing
 
@@ -69,7 +69,7 @@ HTB counts an aggregate as its `skb->len`, which contains the IP and TCP headers
 - `/sys/sfe/fast_tc_filter` set to 1, IPS/Suricata
 - Bridged or relayed PPPoE (the GSO path), PPPoE without VLAN, RFC 4638 (MTU 1500), PPP compression/MPPE (the script refuses to load with those modules)
 - UXG-Fiber (its 6.0.17 kernel has a different build stamp and is not in the list) and UCG-Ultra
-- 6.0.12 and 6.0.15 on a running gateway: both were only checked against the 6.0.11 kernel image (see [After a firmware update](#after-a-firmware-update))
+- 6.0.12, 6.0.15 and 6.0.19 on a running gateway: 6.0.12 and 6.0.15 were only checked against the 6.0.11 kernel image, 6.0.19 against the 6.0.17 image; on a UCG-Fiber running 6.0.19 the build stamp, config, `pppoe.ko` and `qca-nss-dp.ko` hashes were confirmed, the module was not loaded there yet (see [After a firmware update](#after-a-firmware-update))
 
 ### Tested so far
 
@@ -142,7 +142,7 @@ The firmware has no `CONFIG_MODVERSIONS`, so `vermagic` does not protect against
 
 To add a build: confirm that the functions touching these structs are unchanged, for example by comparing `skb_gro_receive`, `dev_gro_receive`, `napi_gro_complete` and `__skb_checksum_complete` between the old and new kernel image with PC-relative immediates masked, and that `pppoe.ko` and `qca-nss-dp.ko` are `.text`-identical. Then add a line with the new `uname -v` and the three sha256 values. A rebuild without code changes keeps the layout; a changed function in the skb code needs a closer look.
 
-The listed builds after 6.0.11 were checked this way, with every changed branch and address target matched against the symbol table: 6.0.12 kernel text is byte-identical; 6.0.15 changes only `skb_recycler_alloc`, which now sets `truesize` using the same offsets as the module; 6.0.16 is byte-identical to 6.0.15; 6.0.17 changes only `tcp_v4_reqsk_destructor` and `inet_sock_destruct` (RCU-deferred freeing of IP options). `pppoe.ko` is unchanged throughout. `qca-nss-dp.ko` changed in 6.0.12 only in its loopback ring setup, not in the WAN receive path.
+The listed builds after 6.0.11 were checked this way, with every changed branch and address target matched against the symbol table: 6.0.12 kernel text is byte-identical; 6.0.15 changes only `skb_recycler_alloc`, which now sets `truesize` using the same offsets as the module; 6.0.16 is byte-identical to 6.0.15; 6.0.17 changes only `tcp_v4_reqsk_destructor` and `inet_sock_destruct` (RCU-deferred freeing of IP options); 6.0.19 is a rebuild of 6.0.17 with no changed function (identical kallsyms, the image differs only in version banners, build-id and initramfs timestamps) and all 362 modules byte-identical, see [compat-6.0.19.md](compat-6.0.19.md). `pppoe.ko` is unchanged throughout. `qca-nss-dp.ko` changed in 6.0.12 only in its loopback ring setup, not in the WAN receive path.
 
 ## Building
 
