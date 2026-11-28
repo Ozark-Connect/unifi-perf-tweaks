@@ -15,13 +15,15 @@
 #       load), removed 10 min after a successful load or on an orderly
 #       shutdown in that window. Still present at start = the box went down
 #       hard within 10 min of a load: do not load until removed by hand.
-#   - delayed load: ppp0 up and a PPPoE session on WAN_DEV (or a VLAN on it)
+#   - delayed load: PPP_IFACE up and a PPPoE session on WAN_DEV (or a VLAN on it)
 #       for 60 s without interruption, within 10 min of the start. A crash
 #       never hits early boot, the box stays reachable for recovery.
 #   - refuses PPP compression (deflate, bsd_comp, mppe); single instance
 #       via flock.
 # WAN device: the physical PPPoE receive device, WAN_DEV below or the first
 # line of /data/pppoe-gro/wan_dev (e.g. eth6, not eth6.7).
+# PPP interface: PPP_IFACE below or the first line of /data/pppoe-gro/ppp_iface
+# (ppp0 for a PPPoE WAN1, ppp1 for WAN2, ...).
 # Revert: stop downloads, rmmod pppoe_gro; or create the disable file.
 # Target: UCG-Fiber, UniFi OS 6.0.11, 6.0.12, 6.0.15, 6.0.16, 6.0.17, 6.0.19, kernel 5.4.213-ui-ipq9574, module v0.4
 
@@ -32,10 +34,11 @@ LOG_FILE="/var/log/${SCRIPT_NAME}.log"
 DISABLE_FILE="${BASE_DIR}/disable"
 MARKER_FILE="${BASE_DIR}/loading.marker"
 WAN_DEV_FILE="${BASE_DIR}/wan_dev"
+PPP_IFACE_FILE="${BASE_DIR}/ppp_iface"
 LOCK_FILE="/run/${SCRIPT_NAME}.lock"
 WAN_DEV="eth6"
 PPP_IFACE="ppp0"
-STABLE_SECS=60          # ppp0 + session must be up this long without a break
+STABLE_SECS=60          # PPP_IFACE + session must be up this long without a break
 WAIT_MAX_SECS=600       # give up if that does not happen within this time
 POLL_SECS=5
 MARKER_HOLD_SECS=600
@@ -64,7 +67,7 @@ module_loaded() {
     lsmod | grep -q "^pppoe_gro "
 }
 
-# true if ppp0 exists and is not down (ppp reports "unknown" when up)
+# true if PPP_IFACE exists and is not down (ppp reports "unknown" when up)
 ppp_up() {
     [ -d "/sys/class/net/${PPP_IFACE}" ] && \
         [ "$(cat "/sys/class/net/${PPP_IFACE}/operstate" 2>/dev/null)" != "down" ]
@@ -88,15 +91,18 @@ module_sha() {
     sha256sum "${MODULE_FILE}" 2>/dev/null | cut -d' ' -f1
 }
 
-# Re-exec in background so on_boot.d does not block (absolute path for nohup)
+# Re-exec in background so on_boot.d does not block (absolute path for nohup).
+# Through sh, so a file without the executable bit (udm-boot sources those)
+# works too. Exit 0 in the foreground in every case: a non-zero exit fails the
+# udm-boot unit, and systemd then kills the background loaders of other scripts.
 if [ "$1" != "--bg" ]; then
     mkdir -p "${BASE_DIR}"
     self=$(readlink -f "$0" 2>/dev/null)
-    if [ -z "$self" ] || [ ! -x "$self" ]; then
-        log "ERROR: cannot re-exec '$0' (not an executable path). Run it by its full path."
-        exit 1
+    if [ -z "$self" ] || [ ! -f "$self" ]; then
+        log "ERROR: cannot re-exec '$0' (not a file path). Run it by its full path."
+        exit 0
     fi
-    nohup "$self" --bg >/dev/null 2>&1 &
+    nohup /bin/sh "$self" --bg >/dev/null 2>&1 &
     exit 0
 fi
 
@@ -121,7 +127,18 @@ if [ "${#WAN_DEV}" -gt 15 ]; then
     exit 1
 fi
 
-log "start (wan_dev=${WAN_DEV})"
+# PPP interface: same rule, validate instead of silently falling back
+if [ -s "${PPP_IFACE_FILE}" ]; then
+    PPP_IFACE=$(head -n1 "${PPP_IFACE_FILE}")
+fi
+case "${PPP_IFACE}" in
+    ppp[0-9]|ppp[1-9][0-9]) ;;
+    *)
+        log "ERROR: invalid PPP interface name '${PPP_IFACE}' (from ${PPP_IFACE_FILE} or default), expected ppp0 to ppp99. Not loading."
+        exit 1 ;;
+esac
+
+log "start (wan_dev=${WAN_DEV}, ppp_iface=${PPP_IFACE})"
 
 if [ ! -d "/sys/class/net/${WAN_DEV}" ]; then
     log "ERROR: WAN device '${WAN_DEV}' does not exist. Set the physical device in ${WAN_DEV_FILE}."
@@ -180,19 +197,19 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-# --- wait until ppp0 and the PPPoE session on WAN_DEV are stable ---
+# --- wait until PPP_IFACE and the PPPoE session on WAN_DEV are stable ---
 log "waiting for ${PPP_IFACE} and a PPPoE session on ${WAN_DEV} to be up for ${STABLE_SECS}s"
 waited=0
 stable=0
 while [ "$stable" -lt "$STABLE_SECS" ]; do
     if [ "$waited" -ge "$WAIT_MAX_SECS" ]; then
-        log "ERROR: no stable PPPoE session on ${WAN_DEV} within ${WAIT_MAX_SECS}s. Not loading."
+        log "ERROR: no stable ${PPP_IFACE} and PPPoE session on ${WAN_DEV} within ${WAIT_MAX_SECS}s. Not loading until the next boot or a manual start of this script."
         exit 1
     fi
     if ppp_up && session_on_wan; then
         stable=$((stable + POLL_SECS))
     else
-        [ "$stable" -gt 0 ] && log "session/ppp0 interrupted, restarting the ${STABLE_SECS}s wait"
+        [ "$stable" -gt 0 ] && log "session/${PPP_IFACE} interrupted, restarting the ${STABLE_SECS}s wait"
         stable=0
     fi
     sleep "$POLL_SECS"
@@ -223,7 +240,18 @@ if [ "$ms" != "${EXP_MODULE_SHA}" ]; then
 fi
 
 # --- load with boot-loop marker (no marker, no load) ---
-if ! { date > "${MARKER_FILE}" && sync && [ -s "${MARKER_FILE}" ]; }; then
+# The marker holds a token of this load. Only the holder of that token removes
+# it, so a holder left over from an earlier load (rmmod, marker removed by
+# hand, script started again within the hold) cannot clear a newer marker.
+MARKER_TOKEN="$$ $(date '+%s')"
+clear_own_marker() {
+    [ "$(cat "${MARKER_FILE}" 2>/dev/null)" = "${MARKER_TOKEN}" ] || return 1
+    rm -f "${MARKER_FILE}"; sync
+}
+# An orderly stop (SIGTERM from systemd) between writing the marker and the
+# start of the holder below must not leave it behind; a crash still does.
+trap 'if module_loaded; then st_msg="module loaded, no boot-loop protection for this load"; else st_msg="module not loaded"; fi; clear_own_marker && log "marker cleared (stopped during the load, ${st_msg})"; exit 0' TERM INT
+if ! { printf '%s\n' "${MARKER_TOKEN}" > "${MARKER_FILE}" && sync && [ -s "${MARKER_FILE}" ]; }; then
     log "ERROR: cannot write ${MARKER_FILE}, boot-loop protection unavailable. Not loading."
     exit 1
 fi
@@ -237,23 +265,29 @@ if insmod "${MODULE_FILE}" wan_dev="${WAN_DEV}"; then
         # released here: the marker itself blocks a new load during the hold.
         (
             exec 9>&-
-            trap 'rm -f "${MARKER_FILE}"; sync; log "marker cleared (orderly stop within hold time)"; exit 0' TERM INT
+            trap 'clear_own_marker && log "marker cleared (orderly stop within hold time)"; exit 0' TERM INT
             sleep "${MARKER_HOLD_SECS}" &
             wait $!
-            rm -f "${MARKER_FILE}"; sync
-            log "marker cleared, module considered stable"
+            if clear_own_marker; then
+                log "marker cleared, module considered stable"
+            elif [ -e "${MARKER_FILE}" ]; then
+                log "marker belongs to a newer load, left in place"
+            fi
         ) &
+        trap - TERM INT
         exit 0
     fi
+    trap - TERM INT
     log "ERROR: module state '${st:-unknown}' after insmod, trying rmmod"
     rmmod pppoe_gro 2>/dev/null
 else
     log "ERROR: insmod failed (rc=$?), see dmesg"
 fi
 # remove the marker only if the module is verifiably not loaded
+trap - TERM INT
 if module_loaded || [ -d /sys/module/pppoe_gro ]; then
     log "ERROR: module still present after a failed load. Keeping ${MARKER_FILE} so the next boot does not load it again."
 else
-    rm -f "${MARKER_FILE}"; sync
+    clear_own_marker
 fi
 exit 1
