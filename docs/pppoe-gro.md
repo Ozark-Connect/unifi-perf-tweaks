@@ -82,7 +82,8 @@ Long-term: the module has been in use on the test gateway since 2026-10-24, firs
 ```bash
 ssh root@<gateway-ip> 'uname -r; uname -v'
 # Expected: 5.4.213-ui-ipq9574
-#           #5.4.213 SMP PREEMPT Thu Oct 1 19:39:57 CST 2026
+#           and a uname -v stamp from VERIFIED_BUILDS in scripts/25-pppoe-gro.sh
+#           (e.g. #5.4.213 SMP PREEMPT Thu Nov 19 22:30:58 CST 2026 for 6.0.19)
 ssh root@<gateway-ip> 'cat /proc/net/pppoe'
 # The Device column must be your WAN device or a VLAN on it (e.g. eth6.7 on eth6)
 ssh root@<gateway-ip> 'lsmod | grep -E "^(ppp_deflate|bsd_comp|ppp_mppe) "'
@@ -99,17 +100,20 @@ scp modules/pppoe-gro/pppoe_gro.ko root@<gateway-ip>:/data/pppoe-gro/
 scp scripts/25-pppoe-gro.sh root@<gateway-ip>:/data/on_boot.d/
 ssh root@<gateway-ip> 'chmod +x /data/on_boot.d/25-pppoe-gro.sh'
 # WAN not on eth6? Put the physical device name into /data/pppoe-gro/wan_dev (eth6, not eth6.7)
+# PPPoE not on WAN1? Put its ppp interface into /data/pppoe-gro/ppp_iface (ppp1 for WAN2, ...)
 ```
 
 First run without a reboot:
 
 ```bash
 ssh root@<gateway-ip> /data/on_boot.d/25-pppoe-gro.sh
-# The script waits until ppp0 and the PPPoE session have been up for 60 s in a row (10 min at most), then loads
+# The script waits until ppp0 (or ppp_iface) and the PPPoE session have been up for 60 s in a row (10 min at most), then loads
 ssh root@<gateway-ip> 'cat /var/log/pppoe-gro.log; lsmod | grep pppoe_gro'
 ```
 
-The script loads only if the running kernel build, kernel config, vendor `pppoe.ko` and `qca-nss-dp.ko` match a verified build and the module file matches its sha256. It checks the module hash again right before `insmod`. It writes `/data/pppoe-gro/loading.marker` before `insmod` (and does not load if it can't) and removes it 10 minutes later, or earlier on an orderly reboot or shutdown. Only a crash or power loss within those 10 minutes leaves the marker; the script then does not load again until you remove it. A second run while a load is less than 10 minutes old is refused for the same reason.
+The script loads only if the running kernel build, kernel config, vendor `pppoe.ko` and `qca-nss-dp.ko` match a verified build and the module file matches its sha256. It checks the module hash again right before `insmod`. It writes `/data/pppoe-gro/loading.marker` before `insmod` (and does not load if it can't) and removes it 10 minutes later, or earlier on an orderly reboot or shutdown. Only a crash or power loss within those 10 minutes leaves the marker; the script then does not load again until you remove it. A second run while a load is less than 10 minutes old is refused for the same reason. A stop of the script itself during the load (for example `systemctl restart udm-boot`) also clears the marker; the log then says whether the module was already loaded, and that load has no boot-loop protection.
+
+If the PPPoE session is not up for 60 s in a row within 10 minutes of the start (ISP outage, OLT down after a power cut), the script logs `no stable ... within 600s` and does not load until the next boot. Start it again by hand once the session is up.
 
 ## Verification
 

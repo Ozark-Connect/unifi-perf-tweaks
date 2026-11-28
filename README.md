@@ -127,7 +127,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 - **`08` must be executable.** `udm-boot` sources a non-executable `.sh` file instead of running it, and `08` refuses to run sourced.
 - `05`-`09` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against an already-restarted environment.
 - `10`, `15`, `19`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
-- `25` waits for `ppp0` and a settle time before it loads, so it does not depend on `19`/`20` finishing first.
+- `25` waits for the PPPoE interface (`ppp0`, or the one in `/data/pppoe-gro/ppp_iface`) and a settle time before it loads, so it does not depend on `19`/`20` finishing first.
 - **If you add your own boot scripts** that touch the database or unifi (mongodump, psql, API calls, etc.), number them >= `10` so they run after `06` or `08`. A failed or skipped offload leaves the database on the eMMC, so check the bind mount before you rely on it.
 ### Model Compatibility
 
@@ -233,6 +233,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - PostgreSQL SSD offload, installation, upgrade behavior and recovery
 - [postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md) - PostgreSQL backup schedule, globals coverage and off-device restore
 - [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
+- [pppoe-gro.md](docs/pppoe-gro.md) - PPPoE GRO/GSO kernel module, verified builds, boot-loop marker, reverting
 
 ### Research
 
@@ -263,6 +264,7 @@ Reports the actual physical-layer speed by reading uniphy SerDes registers direc
 Every script is designed to be safely reversible:
 
 - **journald & JVM heap:** The config files (`/etc/systemd/journald.conf`, `/etc/default/unifi`) are on the overlay filesystem but are **preserved across reboots** - removing the boot script alone does not revert them. You must manually restore stock values (see each script's docs for the sed commands) or wait for a UniFi OS upgrade, which resets the overlay. Either way, remove the boot script first so it doesn't re-apply on the next boot.
+- **PPPoE GRO:** `rmmod pppoe_gro` (stop downloads first) takes effect immediately; `touch /data/pppoe-gro/disable` or removing the boot script makes it permanent. See [docs/pppoe-gro.md](docs/pppoe-gro.md#reverting).
 - **Fan tuning:** `systemctl restart uhwd` immediately resets `config.fan` to defaults (the fan config lives in SDB runtime state, not a file). Remove the boot script to make it permanent.
 - **MongoDB SSD:** See [docs/recovery.md](docs/recovery.md) for the full rollback guide. It covers four scenarios, because the right path depends on *why* you're rolling back: **Path D** (first-run install rollback - use when you just deployed `06` and something went wrong, or you changed your mind within minutes), **Path A** (live-migrate back to eMMC with current data - use when the SSD is healthy and you want off the offload after running it for a while, ~95% of rollbacks), **Path B** (mongorestore from the latest `07-mongodb-ssd-backup.sh` dump - use when the SSD or its data is broken), or **Path C** (nuclear fallback on the pre-deploy eMMC snapshot - stale, only use if Paths A and B both fail). In every path, stop `unifi-mongodb.service` *before* `umount` - the unmount fails with EBUSY while mongod has files open on the bind mount, and a plain `systemctl stop unifi` does not stop mongod (it's owned by a separate unit).
 
