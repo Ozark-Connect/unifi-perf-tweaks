@@ -7,13 +7,15 @@
 # /data/sfp-sgmiiplus/hold-eth6. Hold requires a module exposing active hold
 # and pcs_link parameters. It watches SFP identity and PCS, bounds recovery
 # to three runs/hour, and leaves a stock-1G-capable SFP at 1G after fallback.
-# Only one port may hold at a time. Flags are read at boot and the choice
-# survives automatic recovery; changing flags takes effect on the next boot.
-# Optional, for a PPPoE WAN on this port: /data/sfp-sgmiiplus/pppd-hup (all
-# ports) or /data/sfp-sgmiiplus/pppd-hup-eth6 hangs up the session's pppd with
-# SIGHUP right before the switch, at most once per hour per port, so WAN
-# failover does not wait for pppd's LCP echo timeout. pppd must run with
-# persist so it redials on its own. Without the file nothing changes.
+# Only one port may hold at a time. Hold flags are read at boot and the choice
+# survives automatic recovery; changing them takes effect on the next boot.
+# PPPoE WAN on this port: when exactly one pppd peer runs PPPoE on eth6 (or a
+# VLAN on it) and its session is up, the loader hangs up that pppd with SIGHUP
+# right before the switch, at most once per hour per port, so WAN failover
+# does not wait for pppd's LCP echo timeout. pppd must run with persist so it
+# redials on its own. Turn it off with /data/sfp-sgmiiplus/no-pppd-hup (all
+# ports) or /data/sfp-sgmiiplus/no-pppd-hup-eth6. Without PPPoE on the port
+# nothing changes.
 # Target: UCG-Fiber / UXG-Fiber, kernel 5.4.213-ui-ipq9574.
 
 SCRIPT_NAME="sfp-sgmiiplus"
@@ -138,45 +140,62 @@ esac
 RERUN_TIMES="$2"
 RUN_MODE="$1"
 
-# Optional pppd hangup (see header). The blocker checks the file again right
-# before the signal, so removing it takes effect at once.
-PPPD_HUP_FILE="${MODULE_DIR}/pppd-hup"
-PPPD_HUP=0
-if [ -e "${PPPD_HUP_FILE}" ] || [ -e "${PPPD_HUP_FILE}-${IFACE}" ]; then
-    PPPD_HUP=1
+# pppd hangup for a PPPoE WAN on this port (see header): on unless a
+# no-pppd-hup flag exists. The blocker checks the flag again right before the
+# signal, so setting it takes effect at once.
+PPPD_HUP_OFF_FILE="${MODULE_DIR}/no-pppd-hup"
+pppd_hup_off() {
+    [ -e "${PPPD_HUP_OFF_FILE}" ] || [ -e "${PPPD_HUP_OFF_FILE}-${IFACE}" ]
+}
+PPPD_HUP=1
+if pppd_hup_off; then
+    PPPD_HUP=0
 fi
 
 # One instance at a time, also across the re-exec of the watcher: fd 8 stays
-# open through exec, so a rerun keeps the lock it already holds. Hold needs
-# the lock; the pppd hangup only runs with it, so a second run cannot hang up
-# a session the first run already restored.
-if [ "${HOLD_MODE}" -eq 1 ] || [ "${PPPD_HUP}" -eq 1 ]; then
+# open through exec, so a rerun keeps the lock it already holds. Returns 0
+# with the lock held, 1 if flock did not get it (another run holds it;
+# lock_error is set if flock failed for another reason), 2 with lock_error
+# set if the lock cannot be used at all.
+LOCK_HELD=0
+take_lock() {
     lock_error=""
+    [ ${LOCK_HELD} -eq 0 ] || return 0
     if ! command -v flock >/dev/null 2>&1; then
         lock_error="flock is required"
-    elif [ "$1" != "--rerun" ] || ! { : >&8; } 2>/dev/null; then
+        return 2
+    fi
+    if [ "${RUN_MODE}" != "--rerun" ] || ! { : >&8; } 2>/dev/null; then
         if ! { command exec 8>>"${LOCK_FILE}"; } 2>/dev/null; then
             lock_error="${LOCK_FILE} not writable"
+            return 2
         fi
     fi
-    if [ -z "${lock_error}" ]; then
-        flock -n 8
-        rc=$?
-        if [ $rc -eq 1 ] || { [ $rc -ne 0 ] && [ "${HOLD_MODE}" -eq 1 ]; }; then
+    flock -n 8
+    lock_rc=$?
+    if [ ${lock_rc} -ne 0 ]; then
+        [ ${lock_rc} -eq 1 ] || lock_error="flock failed (exit ${lock_rc})"
+        return 1
+    fi
+    LOCK_HELD=1
+    return 0
+}
+
+# Hold needs the lock from the start. Without hold only the pppd hangup uses
+# it, and takes it right before the hangup, so two runs cannot hang up
+# together and nothing changes for ports without PPPoE.
+if [ "${HOLD_MODE}" -eq 1 ]; then
+    take_lock
+    case $? in
+        1)
             log "Another run is active (${LOCK_FILE} held). Nothing to do."
             exit 0
-        elif [ $rc -ne 0 ]; then
-            lock_error="flock failed (exit ${rc})"
-        fi
-    fi
-    if [ -n "${lock_error}" ]; then
-        if [ "${HOLD_MODE}" -eq 1 ]; then
+            ;;
+        2)
             log "ERROR: ${lock_error}; no module action taken"
             exit 1
-        fi
-        log "pppd hangup off: ${lock_error}"
-        PPPD_HUP=0
-    fi
+            ;;
+    esac
 fi
 
 # ─── Sanity checks ───
@@ -282,7 +301,7 @@ if [ "${HOLD_MODE}" -eq 1 ] && [ "$(sfp_id)" != "${SFP_ID}" ]; then
     exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
 fi
 
-# ─── Optional pppd hangup: functions ───
+# ─── pppd hangup: functions ───
 
 PPP_PEERS_DIR="/etc/ppp/peers"
 PPP_RUN_DIR="/run"
@@ -291,6 +310,8 @@ PROC_DIR="/proc"
 HUP_STAMP_FILE="/run/${MODULE_NAME}.pppd-hup"
 PPP_IFACE=""
 HUP_SENT=0
+HUP_CHECKED=0
+hup_last_skip=""
 HUP_WAIT_SECS=10
 HUP_BOOT_WAIT_SECS=60
 HUP_MIN_INTERVAL=3600
@@ -305,9 +326,9 @@ pppoe_sessions() {
     awk -v dev="${IFACE}" 'NR > 1 && ($3 == dev || index($3, dev ".") == 1) { n++ } END { print n + 0 }' "${PPPOE_PROC}"
 }
 
-# Prints the pppN whose peer file runs PPPoE on ${IFACE} or one of its VLANs
-# (udapi writes "plugin rp-pppoe.so eth6.7"); prints nothing unless exactly one
-ppp_iface_for_port() {
+# Prints "<count> <pppN>" for the peer files that run PPPoE on ${IFACE} or one
+# of its VLANs (udapi writes "plugin rp-pppoe.so eth6.7"); pppN is the last match
+ppp_peers_on_port() {
     name=""
     matches=0
     for f in "${PPP_PEERS_DIR}"/ppp[0-9]*; do
@@ -321,7 +342,13 @@ ppp_iface_for_port() {
                 ;;
         esac
     done
-    [ "$matches" -eq 1 ] && echo "$name"
+    echo "${matches} ${name}"
+}
+
+# Prints the pppN of the one PPPoE peer on the port; nothing unless exactly one
+ppp_iface_for_port() {
+    set -- $(ppp_peers_on_port)
+    [ "$1" = "1" ] && echo "$2"
 }
 
 # True only for a clean positive count; any read or awk error counts as "no session"
@@ -355,11 +382,18 @@ pppd_pid() {
     [ "$count" -eq 1 ] && echo "$found"
 }
 
+# Logs why the hangup is skipped; the same reason is logged once per run
+hup_skip() {
+    [ "$1" != "${hup_last_skip}" ] || return 0
+    hup_last_skip="$1"
+    log "pppd hangup skipped: $1"
+}
+
 # Checks that must hold right before the signal. Prints the reason for a skip,
 # nothing when the hangup may go ahead. $1 = expected pppN.
 pppd_hup_blocker() {
-    if [ ! -e "${PPPD_HUP_FILE}" ] && [ ! -e "${PPPD_HUP_FILE}-${IFACE}" ]; then
-        echo "${PPPD_HUP_FILE} was removed"
+    if pppd_hup_off; then
+        echo "a no-pppd-hup flag is set"
         return
     fi
     if [ "$(ppp_iface_for_port)" != "$1" ]; then
@@ -380,28 +414,53 @@ pppd_hup_blocker() {
 # Hangs up at most once per run and once per HUP_MIN_INTERVAL per port, also
 # across the re-exec of hold recovery (the time stamp lives in /run). A skipped
 # hangup is tried again before the next load attempt of the same run. Any
-# failed check leaves pppd alone.
+# failed check leaves pppd alone. A port without a PPPoE peer is left alone
+# without a log line.
 pppd_hup_before_switch() {
+    HUP_CHECKED=0
     [ ${PPPD_HUP} -eq 1 ] || return 0
     [ ${HUP_SENT} -eq 0 ] || return 0
 
     PPP_IFACE=$(ppp_iface_for_port)
     if [ -z "${PPP_IFACE}" ]; then
-        log "pppd hangup skipped: no single pppd peer runs PPPoE on ${IFACE}"
+        set -- $(ppp_peers_on_port)
+        [ "${1:-0}" -le 1 ] || hup_skip "$1 pppd peers run PPPoE on ${IFACE}"
         return 0
     fi
     reason=$(pppd_hup_blocker "${PPP_IFACE}")
     if [ -n "$reason" ]; then
-        log "pppd hangup skipped: $reason"
+        hup_skip "$reason"
         return 0
     fi
-    hup_now=$(monotonic_seconds) || { log "pppd hangup skipped: cannot read monotonic time"; return 0; }
+
+    # From here on the checks can take a while (boot wait, wait for the session to end)
+    HUP_CHECKED=1
+    take_lock
+    case $? in
+        1)
+            if [ -n "${lock_error}" ]; then
+                log "pppd hangup off: ${lock_error}"
+                PPPD_HUP=0
+            else
+                hup_skip "another run is active (${LOCK_FILE} held)"
+            fi
+            return 0
+            ;;
+        2)
+            log "pppd hangup off: ${lock_error}"
+            PPPD_HUP=0
+            return 0
+            ;;
+    esac
+
+    # The time stamp is read under the lock, so two runs cannot both find it old
+    hup_now=$(monotonic_seconds) || { hup_skip "cannot read monotonic time"; return 0; }
     hup_last=$(cat "${HUP_STAMP_FILE}" 2>/dev/null)
     case "${hup_last}" in
         ''|*[!0-9]*) ;;
         *)
             if [ $((hup_now - hup_last)) -lt ${HUP_MIN_INTERVAL} ]; then
-                log "pppd hangup skipped: the last one was $((hup_now - hup_last))s ago (at most one per ${HUP_MIN_INTERVAL}s)"
+                hup_skip "the last one was $((hup_now - hup_last))s ago (at most one per ${HUP_MIN_INTERVAL}s)"
                 return 0
             fi
             ;;
@@ -410,33 +469,38 @@ pppd_hup_before_switch() {
     # Let the other on_boot.d scripts finish first; the wait budget is per run
     while [ "$(systemctl is-active udm-boot.service 2>/dev/null)" = "activating" ]; do
         if [ ${hup_boot_waited} -ge ${HUP_BOOT_WAIT_SECS} ]; then
-            log "pppd hangup skipped: udm-boot still running after ${hup_boot_waited}s"
+            hup_skip "udm-boot still running after ${hup_boot_waited}s"
             return 0
         fi
         sleep 2
         hup_boot_waited=$((hup_boot_waited + 2))
     done
 
-    # Check everything again after the wait (udapi may have rewritten the peer)
+    # Check everything again after the wait (udapi may have rewritten the peer,
+    # a run without the lock may have switched the port already)
+    if lsmod | grep -q "${MODULE_NAME}"; then
+        hup_skip "${MODULE_NAME} was loaded meanwhile"
+        return 0
+    fi
     pid=$(pppd_pid)
     if [ -z "$pid" ]; then
-        log "pppd hangup skipped: not exactly one 'pppd call ${PPP_IFACE}' process"
+        hup_skip "not exactly one 'pppd call ${PPP_IFACE}' process"
         return 0
     fi
     reason=$(pppd_hup_blocker "${PPP_IFACE}")
     if [ -n "$reason" ]; then
-        log "pppd hangup skipped: $reason"
+        hup_skip "$reason"
         return 0
     fi
     pid_file="${PPP_RUN_DIR}/${PPP_IFACE}.pid"
     if [ "$(head -n 1 "$pid_file" 2>/dev/null)" != "$pid" ]; then
-        log "pppd hangup skipped: $pid_file does not match pid ${pid}"
+        hup_skip "$pid_file does not match pid ${pid}"
         return 0
     fi
 
     # The time stamp comes first: without it the hourly limit would not hold
     if ! { echo "${hup_now}" > "${HUP_STAMP_FILE}"; } 2>/dev/null; then
-        log "pppd hangup skipped: cannot write ${HUP_STAMP_FILE}"
+        hup_skip "cannot write ${HUP_STAMP_FILE}"
         return 0
     fi
     log "Sending SIGHUP to pppd pid ${pid} (${PPP_IFACE})"
@@ -480,7 +544,7 @@ while [ $attempt -le $MAX_ATTEMPTS ]; do
         exec "$0" --rerun "${RERUN_TIMES}" "${HOLD_MODE}"
     fi
     pppd_hup_before_switch
-    if [ "${HOLD_MODE}" -eq 1 ] && [ "$(sfp_id)" != "${SFP_ID}" ]; then
+    if [ "${HOLD_MODE}" -eq 1 ] && [ ${HUP_CHECKED} -eq 1 ] && [ "$(sfp_id)" != "${SFP_ID}" ]; then
         # The hangup can take up to about 70s; never take over a cage that changed meanwhile
         log "SFP in ${IFACE} was removed or replaced; starting over"
         sleep ${WATCH_INTERVAL}
