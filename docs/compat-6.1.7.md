@@ -43,6 +43,8 @@ The SGMII+ module is not affected:
 
 - It reads the per-task stack canary at `task_struct` offset `#1104`. The offset is still `#1104` in 6.1.7 (`sctp.ko` and `tun.ko` show the same canary loads in both images).
 - It reads no other `task_struct` field. Its other kernel structures are `phy_device`, `phy_driver`, `delayed_work` and `mutex`. No phylib, mutex or timer function changed in the kernel. The workqueue watchdog adds state to worker pools, not to `work_struct` or `delayed_work`. `qca-ssdk.ko`, which owns the `phy_driver` and the delayed work the module patches, compiles to identical code against the 6.1.7 headers.
+- The kernel config change is `DETECT_HUNG_TASK` (120 s, `BOOTPARAM_HUNG_TASK_PANIC` not set, so it warns and does not panic), `WQ_WATCHDOG` (warns only) and `DEBUG_NOTIFIERS`. The module's longest sleep is 20 ms, and it registers no notifier. `MODVERSIONS` is still off, so no symbol CRCs apply.
+- All 15 kernel symbols the module imports are present in the 6.1.7 kernel, and the 26 symbols it looks up with `kallsyms_lookup_name` are all defined in `qca-ssdk.ko` (`ubnt_send_phy_event` and `ssdk_port_link_notify` included).
 - `qca-ssdk.ko` differs only in its build timestamp and Jenkins header paths (`debfactory_stable_6.0` → `debfactory_stable_6.1`), so the 10 symbols and the `0x690`/`0x6d0` cache offsets are intact by construction.
 
 `fdt-1` and `fdt-2` are byte-identical to 6.0.19, and the default configuration is still `ucgfiber-2`.
