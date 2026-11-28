@@ -14,6 +14,8 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT_FILES = {'eth5': '19-sfp-sgmiiplus-eth5.sh', 'eth6': '20-sfp-sgmiiplus.sh'}
 BASELINE = '7775899311f8aab3f972f0857afba22cf2752a59'
+# main after the merge of the v5 loaders (hold mode)
+BASELINE_V5 = '016e39cda59f232bcb339f08a7f038657c07bc0d'
 STUB = r'''#!PYTHON
 import fcntl, json, os, signal, sys, time
 from pathlib import Path
@@ -68,6 +70,7 @@ elif name == 'ethtool':
         identity = 'bb' if (s['now'] // 60) % 2 else 'cc'
     if s['scenario'] in ('fallback_swaps', 'budget_swaps'):
         identity = format(16 + (s['now'] // 300) % 100, '02x')
+    if (root / 'cage_swapped').exists(): identity = 'bb'
     if s['scenario'] != 'empty_cage': print('0x0014: ' + ' '.join([identity] * 64))
 elif name == 'cat':
     path = sys.argv[1]
@@ -87,12 +90,36 @@ elif name == 'cat':
     else:
         try: sys.stdout.write(Path(path).read_text())
         except OSError: sys.exit(1)
+elif name == 'ip':
+    if (root / 'ppp_ipv4').exists(): print('5: ppp0    inet 192.0.2.1 peer 192.0.2.254/32 scope global ppp0')
+elif name == 'systemctl':
+    pending = root / 'boot_activating'
+    if pending.exists():
+        # udm-boot still runs on the first call; the named flag appears meanwhile
+        what = pending.read_text(); pending.unlink(); print('activating')
+        if what == 'LOAD': s['loaded'] = True; save()   # another run switched the port
+        else: (root / what).touch()
+    else: print('active')
 else: raise AssertionError(name)
+'''
+PPPD = r'''#!PYTHON
+import os, signal, sys, time
+from pathlib import Path
+root = Path(sys.argv[1]); drop = sys.argv[2] == 'drop'
+def hup(*_):
+    with (root / 'events').open('a') as f: f.write('sighup\n')
+    if sys.argv[2] == 'swap': (root / 'cage_swapped').touch()
+    if drop:
+        (root / 'ppp_ipv4').unlink(missing_ok=True)
+        (root / 'pppoe').write_text('Id Address Device\n')
+signal.signal(signal.SIGHUP, hup)
+(root / 'pppd.ready').write_text(str(os.getpid()))
+while True: time.sleep(0.05)
 '''
 
 
 class World:
-    def __init__(self, scenario='normal', end=600, missing_clock=False, missing_flock=False, bad_lock=False, port='eth6', flag='port', module_api='new', source_text=None, carrier='1'):
+    def __init__(self, scenario='normal', end=600, missing_clock=False, missing_flock=False, bad_lock=False, port='eth6', flag='port', module_api='new', source_text=None, carrier='1', pppd=None):
         self.temp = tempfile.TemporaryDirectory(prefix='sgmiiplus-loader-')
         self.root = Path(self.temp.name)
         self.port = port
@@ -101,10 +128,29 @@ class World:
         self.bin = self.root / 'bin'; self.bin.mkdir()
         stub = self.bin / 'stub'
         stub.write_text(STUB.replace('PYTHON', sys.executable, 1)); stub.chmod(0o755)
-        for name in ('flock', 'sleep', 'date', 'lsmod', 'insmod', 'rmmod', 'ethtool', 'cat'):
+        for name in ('flock', 'sleep', 'date', 'lsmod', 'insmod', 'rmmod', 'ethtool', 'cat', 'ip', 'systemctl'):
             if name != 'flock' or not missing_flock: (self.bin / name).symlink_to(stub)
-        for name in ('grep', 'awk'):
+        for name in ('grep', 'awk', 'tr', 'head'):
             (self.bin / name).symlink_to(shutil.which(name))
+        self.pppd = None
+        for d in ('peers', 'pppd_run', 'proc'): (self.root / d).mkdir()
+        (self.root / 'pppoe').write_text('Id Address Device\n')
+        if pppd is not None:
+            # A PPPoE session on a VLAN of the port, run by a real process that records SIGHUP.
+            # pppd = 'drop' (session ends on SIGHUP), 'keep' (session stays up) or
+            # 'swap' (session stays up, the SFP in the cage changes during the hangup)
+            (self.root / 'peers' / 'ppp0').write_text('plugin rp-pppoe.so ' + port + '.7\npersist\n')
+            (self.root / 'pppoe').write_text('Id Address Device\n00000001 aa:bb:cc:dd:ee:ff ' + port + '.7\n')
+            (self.root / 'ppp_ipv4').touch()
+            helper = self.root / 'pppd.py'; helper.write_text(PPPD.replace('PYTHON', sys.executable, 1))
+            self.pppd = subprocess.Popen([sys.executable, str(helper), str(self.root), pppd])
+            deadline = time.monotonic() + 5
+            while not (self.root / 'pppd.ready').exists() and time.monotonic() < deadline: time.sleep(0.01)
+            pid = str(self.pppd.pid)
+            (self.root / 'proc' / pid).mkdir()
+            (self.root / 'proc' / pid / 'comm').write_text('pppd\n')
+            (self.root / 'proc' / pid / 'cmdline').write_bytes(b'/usr/sbin/pppd\0call\0ppp0\0')
+            (self.root / 'pppd_run' / 'ppp0.pid').write_text(pid + '\n')
         self.state_path = self.root / 'state.json'
         import json
         self.state_path.write_text(json.dumps(dict(now=100, sleeps=0, end=end, loaded=False, loads=0, load_at=0, load_times=[], remove_times=[], insmod_args=[], hold_arg=False, module_api=module_api, scenario=scenario)))
@@ -130,6 +176,11 @@ class World:
             'STATE_FILE="/run/${MODULE_NAME}.1g-sfp"': f'STATE_FILE="{self.root}/1g-sfp"',
             'LOCK_FILE="/run/${MODULE_NAME}.loader.lock"': f'LOCK_FILE="{self.root if bad_lock else self.root / "lock"}"',
             '/sys/class/net/${IFACE}': str(net), '/proc/uptime': str(self.root / 'uptime'),
+            'PPP_PEERS_DIR="/etc/ppp/peers"': f'PPP_PEERS_DIR="{self.root / "peers"}"',
+            'PPP_RUN_DIR="/run"': f'PPP_RUN_DIR="{self.root / "pppd_run"}"',
+            'PPPOE_PROC="/proc/net/pppoe"': f'PPPOE_PROC="{self.root / "pppoe"}"',
+            'PROC_DIR="/proc"': f'PROC_DIR="{self.root / "proc"}"',
+            'HUP_STAMP_FILE="/run/${MODULE_NAME}.pppd-hup"': f'HUP_STAMP_FILE="{self.root / "hup-stamp"}"',
         }
         for old, new in replacements.items():
             if source_text is None and old != '/proc/uptime': assert old in script, old
@@ -152,11 +203,13 @@ class World:
     def close(self):
         for p in self.processes:
             if p.poll() is None: p.terminate(); p.communicate(timeout=5)
+        if self.pppd is not None and self.pppd.poll() is None: self.pppd.kill(); self.pppd.wait(timeout=5)
         self.temp.cleanup()
 
 
 class LoaderTests(unittest.TestCase):
     PORT = 'eth6'
+    OTHER = 'eth5'
 
     def world(self, **kw):
         w = World(port=self.PORT, **kw); self.addCleanup(w.close); return w
@@ -316,9 +369,162 @@ class LoaderTests(unittest.TestCase):
         self.assertIn('Another run is active', w.log())
         self.assertIsNone(first.poll())
 
+    # ─── pppd hangup (on for a PPPoE WAN on the port, off with no-pppd-hup) ───
+    def events(self, w): return (w.root / 'events').read_text().split()
+    def test_pppd_hup_hangs_up_once_before_the_first_load(self):
+        w = self.world(flag='none', pppd='drop')
+        self.assertEqual(w.finish(w.start()), 0)
+        events = self.events(w)
+        self.assertEqual(events.count('sighup'), 1)
+        self.assertLess(events.index('sighup'), events.index('insmod'))
+        self.assertIn('locked', events)
+        self.assertIn('PPPoE session ended after', w.log())
+        for args in w.state()['insmod_args']: self.assertEqual(args, [w.module + '.ko'])
+    def test_pppd_hup_once_per_run_across_clock_retries(self):
+        w = self.world(flag='none', scenario='clock_retries', pppd='keep')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertEqual(w.state()['loads'], 3)
+        self.assertEqual(self.events(w).count('sighup'), 1)
+        self.assertIn('still up 10s after SIGHUP', w.log())
+    def test_pppd_hup_at_most_once_per_hour_across_hold_recovery(self):
+        w = self.world(scenario='budget_swaps', end=2200, pppd='keep')
+        w.finish(w.start())
+        self.assertGreater(w.state()['loads'], 1)
+        self.assertEqual(self.events(w).count('sighup'), 1)
+        self.assertIn('at most one per 3600s', w.log())
+    def test_pppd_hup_off_flag_or_no_persist_leaves_pppd_alone(self):
+        for flag in ('no-pppd-hup', 'no-pppd-hup-' + self.PORT):
+            with self.subTest(flag=flag):
+                w = self.world(flag='none', pppd='drop'); (w.root / flag).touch()
+                self.assertEqual(w.finish(w.start()), 0)
+                self.assertNotIn('sighup', self.events(w))
+                self.assertNotIn('locked', self.events(w))
+                self.assertNotIn('pppd hangup', w.log())
+                self.assertEqual(w.state()['loads'], 1)
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'peers' / 'ppp0').write_text('plugin rp-pppoe.so ' + self.PORT + '.7\n')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('has no persist', w.log())
+    def test_pppd_hup_off_flag_of_the_other_port_is_ignored(self):
+        w = self.world(flag='none', pppd='drop'); (w.root / ('no-pppd-hup-' + self.OTHER)).touch()
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertEqual(self.events(w).count('sighup'), 1)
+    def test_pppd_hup_off_flag_set_during_the_boot_wait_is_honoured(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'boot_activating').write_text('no-pppd-hup')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('a no-pppd-hup flag is set', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+    def test_pppoe_on_the_other_port_changes_nothing(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'peers' / 'ppp0').write_text('plugin rp-pppoe.so ' + self.OTHER + '.7\npersist\n')
+        (w.root / 'pppoe').write_text('Id Address Device\n00000001 aa:bb:cc:dd:ee:ff ' + self.OTHER + '.7\n')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertNotIn('locked', self.events(w))
+        self.assertNotIn('pppd', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+    def test_pppoe_on_a_port_that_only_shares_the_name_prefix_changes_nothing(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'peers' / 'ppp0').write_text('plugin rp-pppoe.so ' + self.PORT + '0.7\npersist\n')
+        (w.root / 'pppoe').write_text('Id Address Device\n00000001 aa:bb:cc:dd:ee:ff ' + self.PORT + '0.7\n')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertNotIn('locked', self.events(w))
+        self.assertNotIn('pppd', w.log())
+        # A session on the look-alike port does not count for a peer on this port either
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'pppoe').write_text('Id Address Device\n00000001 aa:bb:cc:dd:ee:ff ' + self.PORT + '0.7\n')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('no PPPoE session with IPv4', w.log())
+    def test_pppd_hup_skipped_when_another_run_switched_during_the_boot_wait(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'boot_activating').write_text('LOAD')
+        w.finish(w.start())
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('was loaded meanwhile', w.log())
+        self.assertFalse((w.root / 'hup-stamp').exists())
+    def test_pppd_hup_off_flag_works_in_hold(self):
+        w = self.world(pppd='drop'); (w.root / 'no-pppd-hup').touch()
+        w.finish(w.start())
+        self.assertNotIn('sighup', self.events(w))
+        self.assertNotIn('pppd hangup', w.log())
+        self.assertGreaterEqual(w.state()['loads'], 1)
+    def test_pppd_hup_unwritable_lock_switches_without_hangup(self):
+        w = self.world(flag='none', bad_lock=True, pppd='drop')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('pppd hangup off:', w.log()); self.assertIn('not writable', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+    def test_pppd_hup_skip_reason_is_logged_once_per_run(self):
+        w = self.world(flag='none', scenario='clock_retries', pppd='drop')
+        (w.root / 'pppoe').write_text('Id Address Device\n'); (w.root / 'ppp_ipv4').unlink()
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertEqual(w.state()['loads'], 3)
+        self.assertEqual(w.log().count('pppd hangup skipped'), 1)
+    def test_hold_without_pppoe_reads_the_sfp_as_often_as_before(self):
+        reference = subprocess.run(['git', 'show', BASELINE_V5 + ':scripts/' + SCRIPT_FILES[self.PORT]], cwd=REPO, capture_output=True, text=True)
+        if reference.returncode: self.fail('main Git object ' + BASELINE_V5 + ' is missing')
+        current = self.world(end=400); original = self.world(end=400, source_text=reference.stdout)
+        current.finish(current.start()); original.finish(original.start())
+        self.assertEqual((current.root / 'events').read_text(), (original.root / 'events').read_text())
+        self.assertEqual(current.log().replace(str(current.root), '<root>'), original.log().replace(str(original.root), '<root>'))
+    def test_pppd_hup_two_peers_on_the_port_leave_pppd_alone(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'peers' / 'ppp1').write_text('plugin rp-pppoe.so ' + self.PORT + '\npersist\n')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertNotIn('locked', self.events(w))
+        self.assertIn('2 pppd peers run PPPoE on ' + self.PORT, w.log())
+    def test_pppd_hup_session_not_up_switches_without_hangup(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'pppoe').write_text('Id Address Device\n'); (w.root / 'ppp_ipv4').unlink()
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertNotIn('locked', self.events(w))
+        self.assertIn('no PPPoE session with IPv4', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+    def test_pppd_hup_skipped_while_another_run_holds_the_lock(self):
+        import fcntl
+        w = self.world(flag='none', pppd='drop')
+        with open(w.root / 'lock', 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('pppd hangup skipped: another run is active', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+    def test_pppd_hup_without_flock_switches_without_hangup(self):
+        w = self.world(flag='none', missing_flock=True, pppd='drop')
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('pppd hangup off: flock is required', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+
+    def test_pppd_hup_rechecks_the_sfp_before_loading_in_hold(self):
+        w = self.world(end=400, pppd='swap')
+        w.finish(w.start())
+        events = self.events(w)
+        self.assertEqual(events.count('sighup'), 1)
+        self.assertIn('removed or replaced; starting over', w.log())
+        # No load before the start over; the rerun loads the new SFP without a second hangup
+        self.assertGreater(events.index('insmod'), events.index('sighup'))
+        self.assertEqual(w.state()['loads'], 1)
+        self.assertIn('at most one per 3600s', w.log())
+    def test_pppd_hup_skipped_when_the_time_stamp_cannot_be_written(self):
+        w = self.world(flag='none', pppd='drop')
+        (w.root / 'hup-stamp').mkdir()
+        self.assertEqual(w.finish(w.start()), 0)
+        self.assertNotIn('sighup', self.events(w))
+        self.assertIn('cannot write', w.log())
+        self.assertEqual(w.state()['loads'], 1)
+
 
 class Eth5LoaderTests(LoaderTests):
     PORT = 'eth5'
+    OTHER = 'eth6'
 
 
 if __name__ == '__main__': unittest.main()

@@ -439,6 +439,67 @@ The shared QCA SFP callback permits only one active hold instance. Test the
 other-port default combination separately; common source code and own-bit bitmap
 restoration do not by themselves prove dual-port behavior on hardware.
 
+### PPPoE WAN on the SFP port (pppd hangup)
+
+Some SFP sticks drop the PPPoE session when the port switches to 2.5G and stay silent
+for a while. pppd does not see that right away: it notices only after its LCP echo
+requests go unanswered, and until then the WAN looks up, so failover to a second WAN
+does not kick in. On one UCG-Fiber with a GPON stick (Luleey LL-XS2510, Telekom, PPPoE
+on VLAN 7) and the v4 module, the stick was silent for about 60s after the switch, and
+pppd gave up after about 42s. IPv4 was gone for that whole time.
+
+So when the WAN on the SFP port is PPPoE, the loader hangs up pppd with SIGHUP right
+before the switch. The session ends cleanly, failover starts at once, and pppd redials
+on its own. There is nothing to configure: the loader finds the PPPoE peer by itself.
+A port without a PPPoE peer is not touched: the loader takes no lock, sends no signal
+and logs nothing about it. A peer file left over from an earlier PPPoE setup on the
+port only adds one "pppd hangup skipped" log line per run.
+
+To turn the hangup off, create a flag file:
+
+```bash
+touch /data/sfp-sgmiiplus/no-pppd-hup        # all ports
+touch /data/sfp-sgmiiplus/no-pppd-hup-eth6   # or this port only
+```
+
+The hangup only happens when all of these hold right before the signal: no
+`no-pppd-hup` flag exists, exactly one pppd peer in `/etc/ppp/peers` runs PPPoE on the
+port (or a VLAN on it), that peer has `persist`, the session is up with IPv4, and
+exactly one `pppd call pppN` process matches the PID file. If the session is not up
+yet (for example at boot, or with a stick that has no 1G link), there is nothing to
+hang up and the switch goes ahead. During boot the loader first waits up to 60s for
+the other on_boot.d scripts to finish.
+
+It hangs up at most once per run: if the checks fail before one load attempt, it tries
+again before the next attempt; once the hangup has been sent, further retries in the
+same run switch without one. It also hangs up at most once per hour per port,
+across hold recovery re-execs: the time of the last hangup is kept in
+`/run/<module>.pppd-hup` (monotonic, cleared by a reboot). A recovery run after a
+lost link usually finds no session and skips the hangup anyway.
+
+Before the hangup the loader takes the same instance lock as hold mode, so two runs
+on the same port cannot hang up together. Later runs are kept off by the hourly limit
+and by the check for an already loaded module. Without hold, a run that finds the lock
+taken, or cannot use it (no `flock`, `/run` not writable), goes on without a hangup,
+and a run that finds the module loaded after its boot wait leaves pppd alone. If the
+time stamp cannot be written, the hangup is skipped. In hold mode the loader checks the SFP identity again after the hangup and
+starts over if the cage changed meanwhile. With a hangup, a run can take up to about
+70s longer (boot wait and the wait for the session to end).
+
+On the setup above, IPv4 on the LAN dropped for about 3s instead of 45s, and traffic
+went over the second WAN until PPPoE came back 68 to 87s after the switch. That time
+depends on when the stick answers again relative to pppd's discovery retries. A plain
+redial without the switch took about 6s. These numbers were measured with the v4
+module and the hangup behind an opt-in flag; measure again on your stick before
+relying on them.
+
+A new session usually means a new IPv4 address and a new delegated IPv6 prefix. With a
+stick that keeps its session through the switch, the hangup only adds a redial; set
+`no-pppd-hup` there. The hangup is sent before the module is loaded, so a module that
+fails to load (for example after a firmware update it does not support yet) still
+costs one redial per boot until the flag is set. The `no-pppd-hup` flags are read on
+every run and again right before the signal; they do not need a reboot.
+
 ### Validation scope
 
 Hardware acceptance of the new mode split is pending: boot and SFP-event recovery
