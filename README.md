@@ -26,7 +26,7 @@ Several of these tweaks are already available as one-click deployments through [
 
 **These modifications are at your own risk.**
 
-Everything here has been thoroughly tested and vetted on production hardware, and runs across a large fleet of gateways through Network Optimizer. Testing has focused on the UCG-Fiber and UXG-Fiber. If you're running a different model, there's a real chance something could go wrong due to different paths, mount points, or service behavior. In a worst-case scenario, you may need to factory reset your gateway and restore from backup.
+The established tweaks have been tested on production hardware and run across a large fleet of gateways through Network Optimizer. Features marked Testing, including optional SFP hold mode, have a narrower validation scope described in their documentation. Testing has focused on the UCG-Fiber and UXG-Fiber. If you're running a different model, there's a real chance something could go wrong due to different paths, mount points, or service behavior. In a worst-case scenario, you may need to factory reset your gateway and restore from backup.
 
 **Before you touch anything:**
 
@@ -106,10 +106,10 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`09-postgresql-ssd-backup.sh`](scripts/09-postgresql-ssd-backup.sh) | 09 | Scheduled PostgreSQL database + globals backups (SSD + compressed eMMC archive) | UCG-Fiber/Max with SSD | **Testing** |
 | [`10-journald-volatile.sh`](scripts/10-journald-volatile.sh) | 10 | Move system logs to RAM | All UCG | Stable |
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
-| [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
-| [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | Stable |
+| [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable (hold mode: Testing) |
+| [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | Stable (hold mode: Testing) |
 
-> **SGMII+ (`19` / `20`):** Promoted from Testing to Stable — the modules have been running continuously on production UCG-Fiber and UXG-Fiber gateways for a couple months, across every UniFi OS release each model received from 5.1.15 through 6.0.5, including the 6.0.x Debian 13 rebase (no rebuild needed). Deploy **one script at a time**: loading both modules simultaneously is not supported (see the [port bitmap caveat](docs/sfp-sgmiiplus.md#port-bitmap-exclusion)).
+> **SGMII+ (`19` / `20`):** The existing boot-time 2.5G setup remains the default (`hold=0`), with the stock QCA SFP callback and no persistent watcher. After an SFP event, a SerDes reversion to 1G does not establish a working 1G data path; traffic may remain unavailable until a planned gateway reboot. Both port-specific modules use a common implementation. Optional `hold=1` keeps SGMII+ across SFP events and adds bounded recovery monitoring; this mode is **Testing**. Enable it for at most one port, because the QCA SFP driver hook is shared. A second hold request is rejected without loading a module for that port; use a port-specific flag, rather than the global flag, when both loaders are installed. The other port can use the default mode; concurrent dual-port operation and the new hold modes still require hardware acceptance. See [modes and port mapping](docs/sfp-sgmiiplus.md#module-modes). For installation, updates and rollback, replace the appropriate files and use a planned gateway reboot, rather than unloading a running module.
 
 > **PostgreSQL SSD offload and backup (`08` / `09`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. `08` moves the Network app's PostgreSQL cluster (`14/apps`) to the SSD. `09` backs it up daily to the SSD and weekly to the eMMC. Both are in testing: field-verified on UCG-Fiber gateways (first migration, reboot, and a UniFi OS 6.0.10 to 6.0.11 upgrade while offloaded), not yet released through Network Optimizer. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) and [docs/postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md).
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
@@ -185,7 +185,7 @@ ssh root@<gateway-ip> /data/on_boot.d/10-journald-volatile.sh
 ssh root@<gateway-ip> journalctl --header | grep "File path"
 ```
 
-**Deploy one script at a time.** Verify it works before adding the next one.
+**Deploy one script at a time.** Verify it works before adding the next one. For SFP scripts `19` / `20`, follow the [module deployment instructions](docs/sfp-sgmiiplus.md#deployment): copy the module and loader, then use a planned gateway reboot instead of the manual test-run step above.
 
 ## Updating
 
@@ -210,11 +210,12 @@ When the new version actually takes effect depends on what kind of script it is:
 
 - **Config-file scripts** (`05-jvm-heap-tuning`, `10-journald-volatile`, `15-fan-control-tuning`): the new logic runs on next boot. To apply it right away, re-run the script manually (`ssh root@<gateway-ip> /data/on_boot.d/<script>.sh`). For `05`, you'll also need to `systemctl restart unifi` afterward for the controller to pick up new JVM flags.
 - **SSD offload** (`06`): replacing the script file does not change the live bind mount. The new boot-time logic runs on next boot. You can also re-run it manually, which is idempotent - if the bind mount is already set up, the script exits early without doing anything.
+- **SFP modules and loaders** (`19` / `20`): replace the matching `.ko` and script, verify the copied files, then reboot the gateway during a planned outage. Replacing a `.ko` does not update a loaded module. Do not apply an update by live `rmmod` / `insmod`; older loaded modules do not have the new transition locking. See [SFP updates and rollback](docs/sfp-sgmiiplus.md#updating).
 - **Backup** (`07`): re-run manually to reinstall the cron and the `/data/unifi-db-ssd/backup.sh` helper with the new version. Changes to the backup schedule take effect immediately.
 
 If you've modified a script locally (for example, changed the heap sizes at the top of `05-jvm-heap-tuning.sh`), `git pull` may throw a merge conflict, and overwriting on the gateway with `scp` will lose your edits. Keep a note of any local changes, or track them on a local branch.
 
-There's no version fingerprint baked into the scripts today. If you need to know what version is running on a given gateway, compare the file on the gateway against your local clone, or trust that what you last `scp`'d is what's there.
+There's no version fingerprint baked into the scripts today. If you need to know what version is running on a given gateway, compare the file on the gateway against your local clone. For a kernel module, this verifies the file for the next boot, not the currently loaded code; reboot and check the module and loader log afterward.
 
 ## Documentation
 
