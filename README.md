@@ -108,8 +108,11 @@ See [docs/emmc-write-pressure.md](docs/emmc-write-pressure.md) and [docs/jvm-gc-
 | [`15-fan-control-tuning.sh`](scripts/15-fan-control-tuning.sh) | 15 | Lower fan controller temperature setpoints | UCG with uhwd PID fan control | Stable |
 | [`19-sfp-sgmiiplus-eth5.sh`](scripts/19-sfp-sgmiiplus-eth5.sh) | 19 | Force 1st SFP+ port (eth5 / Port 6) to 2.5G | UCG-Fiber / UXG-Fiber | Stable (hold mode: Testing) |
 | [`20-sfp-sgmiiplus.sh`](scripts/20-sfp-sgmiiplus.sh) | 20 | Force 2nd SFP+ port (eth6 / Port 7) to 2.5G | UCG-Fiber / UXG-Fiber | Stable (hold mode: Testing) |
+| [`25-pppoe-gro.sh`](scripts/25-pppoe-gro.sh) | 25 | GRO/GSO for PPPoE WAN downloads (kernel module) | UCG-Fiber, UniFi OS 6.0.11, 6.0.12, 6.0.15 to 6.0.17, 6.0.19 | **Testing** |
 
 > **SGMII+ (`19` / `20`):** The existing boot-time 2.5G setup remains the default (`hold=0`), with the stock QCA SFP callback and no persistent watcher. After an SFP event, a SerDes reversion to 1G does not establish a working 1G data path; traffic may remain unavailable until a planned gateway reboot. Both port-specific modules use a common implementation. Optional `hold=1` keeps SGMII+ across SFP events and adds bounded recovery monitoring; this mode is **Testing**. Enable it for at most one port, because the QCA SFP driver hook is shared. A second hold request is rejected without loading a module for that port; use a port-specific flag, rather than the global flag, when both loaders are installed. The other port can use the default mode; concurrent dual-port operation and the new hold modes still require hardware acceptance. See [modes and port mapping](docs/sfp-sgmiiplus.md#module-modes). For installation, updates and rollback, replace the appropriate files and use a planned gateway reboot, rather than unloading a running module.
+
+> **PPPoE GRO (`25`):** Backport of the Linux 7.2 PPPoE GRO/GSO offload. On a PPPoE WAN with Smart Queues, downloads no longer cross the CPU packet by packet: two TCP downloads went from 500-700 to 800-870 Mbit/s and CPU per bit dropped by 20-40 % on a UCG-Fiber. QUIC/UDP is not aggregated. The module is bound to one verified kernel build and refuses to load on any other; with it, a Smart Queues rate lets about 2 % more IPv4 and 4 % more IPv6 TCP traffic through. See [docs/pppoe-gro.md](docs/pppoe-gro.md).
 
 > **PostgreSQL SSD offload and backup (`08` / `09`):** UniFi Network 11.0.81 migrates the Network app from MongoDB to PostgreSQL, so `06` and `07` no longer cover the live database. `08` moves the Network app's PostgreSQL cluster (`14/apps`) to the SSD. `09` backs it up daily to the SSD and weekly to the eMMC. Both are in testing: field-verified on UCG-Fiber gateways (first migration, reboot, and a UniFi OS 6.0.10 to 6.0.11 upgrade while offloaded), not yet released through Network Optimizer. See [docs/postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) and [docs/postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md).
 > **JVM heap tuning (`05`):** After extended profiling across 5+ heap configurations, JVM parameter tweaks showed minimal measurable impact on GC pause behavior. The stock GraalVM Serial GC configuration is already reasonably tuned. The real wins came from eliminating eMMC write pressure (scripts `06` and `10`). The script is included for reference but is not a recommended deployment.
@@ -124,6 +127,7 @@ Scripts run alphabetically via `/data/on_boot.d/`. The numbering gives you a sen
 - **`08` must be executable.** `udm-boot` sources a non-executable `.sh` file instead of running it, and `08` refuses to run sourced.
 - `05`-`09` run first so the unifi restart happens up front. Everything after (`10`, `15`, and any third-party scripts you add) runs against an already-restarted environment.
 - `10`, `15`, `19`, and `20` are independent and non-disruptive (no unifi restart). Order between them doesn't matter.
+- `25` waits for the PPPoE interface (`ppp0`, or the one in `/data/pppoe-gro/ppp_iface`) and a settle time before it loads, so it does not depend on `19`/`20` finishing first.
 - **If you add your own boot scripts** that touch the database or unifi (mongodump, psql, API calls, etc.), number them >= `10` so they run after `06` or `08`. A failed or skipped offload leaves the database on the eMMC, so check the bind mount before you rely on it.
 ### Model Compatibility
 
@@ -229,6 +233,7 @@ Each script has detailed documentation in [`docs/`](docs/):
 - [postgresql-ssd-offload.md](docs/postgresql-ssd-offload.md) - PostgreSQL SSD offload, installation, upgrade behavior and recovery
 - [postgresql-ssd-backup.md](docs/postgresql-ssd-backup.md) - PostgreSQL backup schedule, globals coverage and off-device restore
 - [sfp-sgmiiplus.md](docs/sfp-sgmiiplus.md) - SFP+ 2.5G kernel module, deployment, caveats
+- [pppoe-gro.md](docs/pppoe-gro.md) - PPPoE GRO/GSO kernel module, verified builds, boot-loop marker, reverting
 
 ### Research
 
@@ -259,6 +264,7 @@ Reports the actual physical-layer speed by reading uniphy SerDes registers direc
 Every script is designed to be safely reversible:
 
 - **journald & JVM heap:** The config files (`/etc/systemd/journald.conf`, `/etc/default/unifi`) are on the overlay filesystem but are **preserved across reboots** - removing the boot script alone does not revert them. You must manually restore stock values (see each script's docs for the sed commands) or wait for a UniFi OS upgrade, which resets the overlay. Either way, remove the boot script first so it doesn't re-apply on the next boot.
+- **PPPoE GRO:** `rmmod pppoe_gro` (stop downloads first) takes effect immediately; `touch /data/pppoe-gro/disable` or removing the boot script makes it permanent. See [docs/pppoe-gro.md](docs/pppoe-gro.md#reverting).
 - **Fan tuning:** `systemctl restart uhwd` immediately resets `config.fan` to defaults (the fan config lives in SDB runtime state, not a file). Remove the boot script to make it permanent.
 - **MongoDB SSD:** See [docs/recovery.md](docs/recovery.md) for the full rollback guide. It covers four scenarios, because the right path depends on *why* you're rolling back: **Path D** (first-run install rollback - use when you just deployed `06` and something went wrong, or you changed your mind within minutes), **Path A** (live-migrate back to eMMC with current data - use when the SSD is healthy and you want off the offload after running it for a while, ~95% of rollbacks), **Path B** (mongorestore from the latest `07-mongodb-ssd-backup.sh` dump - use when the SSD or its data is broken), or **Path C** (nuclear fallback on the pre-deploy eMMC snapshot - stale, only use if Paths A and B both fail). In every path, stop `unifi-mongodb.service` *before* `umount` - the unmount fails with EBUSY while mongod has files open on the bind mount, and a plain `systemctl stop unifi` does not stop mongod (it's owned by a separate unit).
 
