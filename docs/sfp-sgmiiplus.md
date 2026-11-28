@@ -439,6 +439,56 @@ The shared QCA SFP callback permits only one active hold instance. Test the
 other-port default combination separately; common source code and own-bit bitmap
 restoration do not by themselves prove dual-port behavior on hardware.
 
+### PPPoE WAN on the SFP port (optional pppd hangup)
+
+Some SFP sticks drop the PPPoE session when the port switches to 2.5G and stay silent
+for a while. pppd does not see that right away: it notices only after its LCP echo
+requests go unanswered, and until then the WAN looks up, so failover to a second WAN
+does not kick in. On one UCG-Fiber with a GPON stick (Luleey LL-XS2510, Telekom, PPPoE
+on VLAN 7) and the v4 module, the stick was silent for about 60s after the switch, and
+pppd gave up after about 42s. IPv4 was gone for that whole time.
+
+With a flag file the loader hangs up pppd with SIGHUP right before the switch, so the
+session ends cleanly, failover starts at once, and pppd redials on its own:
+
+```bash
+touch /data/sfp-sgmiiplus/pppd-hup        # all ports
+touch /data/sfp-sgmiiplus/pppd-hup-eth6   # or this port only
+```
+
+Without the file the loaders behave exactly as before. With it, the hangup only
+happens when all of these hold right before the signal: the file still exists,
+exactly one pppd peer runs PPPoE on the port (or a VLAN on it), that peer has
+`persist`, the session is up with IPv4, and exactly one `pppd call pppN` process
+matches the PID file. During boot the loader first waits up to 60s for the other
+on_boot.d scripts to finish.
+
+It hangs up at most once per run: if the checks fail before one load attempt (for
+example because the session is not up yet at boot), it tries again before the next
+attempt; once the hangup has been sent, further retries in the same run switch without
+one. It also hangs up at most once per hour per port,
+across hold recovery re-execs: the time of the last hangup is kept in
+`/run/<module>.pppd-hup` (monotonic, cleared by a reboot). A recovery run after a
+lost link usually finds no session and skips the hangup anyway. The flag takes the
+same instance lock as hold mode, so a second run on the same port ends with "Another
+run is active"; if the lock cannot be taken (no `flock`, `/run` not writable), the
+run goes on without a hangup. If the time stamp cannot be written, the hangup is
+skipped. In hold mode the loader checks the SFP identity again after the hangup and
+starts over if the cage changed meanwhile. With the flag set, a run can take up to
+about 70s longer (boot wait and the wait for the session to end).
+
+On the setup above, IPv4 on the LAN dropped for about 3s instead of 45s, and traffic
+went over the second WAN until PPPoE came back 68 to 87s after the switch. That time
+depends on when the stick answers again relative to pppd's discovery retries. A plain
+redial without the switch took about 6s. These numbers were measured with the v4
+module; measure again on your stick before relying on them.
+
+Only use it if your stick loses the session on the switch anyway. A new session usually
+means a new IPv4 address and a new delegated IPv6 prefix, so with a stick that
+keeps its session through the switch the hangup only adds a redial.
+
+To turn it off, remove the flag file.
+
 ### Validation scope
 
 Hardware acceptance of the new mode split is pending: boot and SFP-event recovery
