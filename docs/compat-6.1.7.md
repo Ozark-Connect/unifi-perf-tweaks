@@ -18,7 +18,7 @@
 
 | Tweak | Static (UCG-Fiber image) | Live (UCG-Fiber) |
 |---|---|---|
-| 19 + 20 SGMII+ | ✓ `qca-ssdk.ko` `.text`, `.data`, `.rodata` and symbol table identical to 6.0.19. Both device trees byte-identical. The kernel changes do not reach the structures the module uses (see below) | Not deployed |
+| 19 + 20 SGMII+ | ✓ `qca-ssdk.ko` `.text`, `.data`, `.rodata` and symbol table identical to 6.0.19. Both device trees byte-identical. The kernel changes do not reach the structures the module uses (see below) | Partial. See SGMII+ load test below |
 | 06 + 07 MongoDB | ✓ `mongod`, `mongodump`, `unifi-mongodb.service`, `/etc/default/unifi` identical to 6.0.19 | N/A (neither gateway runs 06 + 07) |
 | 08 + 09 PostgreSQL | ✓ `/etc/default/postgresql/14-apps`, `pg-cluster-setup`, `usr/lib/postgresql/14/`, `usr/share/postgresql-common/`, `/etc/postgresql*` and the units identical to 6.0.19. New `pid-cleanup.conf` drop-in (see below). No new `14-apps` reference | ✓ See below |
 | `mongodb-ssd-decommission.sh` | ✓ Its dependencies are covered by the 06 + 07 and 08 + 09 rows | Not run |
@@ -89,6 +89,12 @@ Read-only, on two production UCG-Fiber gateways. Both run the build above, and t
 | 15 fan | ✓ The upgrade reset SDB `config.fan` to stock (100/68/109/103). Script 15 applied 65/55/85/90 at 17:57:08 UTC with no `ERROR`; `ufcd` restarted at 17:57:09. SDB still holds the tuned values a day later. `fan_ctrl_sm` maps = 4. Actuator inconclusive: the hottest sensor read 50.0 °C, below the 65 °C setpoint, so PWM held the 38 floor | ✓ The upgrade reset SDB `config.fan` to stock (100/68/109/103). Script 15 applied 65/55/85/90 at 09:08:26 UTC with no `ERROR`; `ufcd` restarted the same second, after the write. SDB still holds the tuned values. `fan_ctrl_sm` maps = 4. Actuator: CPU sensors 64.0 to 70.2 °C, above the tuned (65) and below the stock (100) setpoint, drive PWM 53 (2,573 rpm), above the 38 floor |
 
 The `ustd` 6.1.1 changes to `config.so` and `hdl.so` therefore leave script 15's `SDBClient` path working.
+
+### SGMII+ load test
+
+On the gateway without SSD, which has no SFP in either cage, at 18:22:03 UTC: `insmod` of the repo `force_uniphy1_sgmiiplus.ko` (md5 `0a89feab…`) with `eth6` down and no link. The module loaded into the 6.1.7 kernel, resolved all symbols, passed its `qca-ssdk` private-data layout checks, entered and left its locked transition, and read port 5 as mode `0x8`, uniphy1 mac_mode `0xe`. That is not stock SGMII 1G (an empty cage), so it declined to take over and returned `-EBUSY`, as designed. Nothing stayed loaded. No hung task, workqueue lockup or other kernel warning followed, and the LAN ports and WAN were unaffected.
+
+This proves the load path, every symbol lookup and the layout checks on 6.1.7. It does not exercise the SGMII+ switch itself, which needs an SFP holding the port in SGMII 1G.
 
 No new reference `.ko`: `qca-ssdk.ko` code is identical to `research/qca-ssdk-compare/qca-ssdk-6.0.15.ko`. Working files: `~/fw-617-ucgf/` on the NAS. The kernel `Image` is the gzip at `.bin` offset 747960 (`~/tools-6017/kimg.py`).
 
